@@ -1,0 +1,275 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ExternalRatingSource {
+  IMDB
+  ROTTEN_TOMATOES
+  TMDB
+}
+
+enum AuditActionType {
+  AUTH_LOGIN
+  AUTH_LOGOUT
+  COLLECTION_ADD_MOVIE
+  COLLECTION_REMOVE_MOVIE
+  RATING_SUBMIT
+  SEARCH_STRUCTURED
+  SEARCH_AI_NATURAL_LANGUAGE
+  AI_RECOMMENDATION_REQUEST
+  AI_AGENT_CHAT
+  ADMIN_LLM_PROVIDER_CHANGED
+  ADMIN_LLM_MODEL_CHANGED
+  MOVIE_IMPORT_OMDB
+  MOVIE_IMPORT_TMDB
+  CATALOG_REMOVE_MOVIE
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  displayName  String    @map("display_name")
+  role         UserRole  @default(USER)
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  collections      UserCollection[]
+  ratings          UserMovieRating[]
+  reviews          Review[]
+  hiddenMovies     UserHiddenMovie[]
+  auditLogs       AuditLog[]
+  appSettingsMeta AppSettings[] @relation("AppSettingsUpdatedBy")
+
+  @@map("users")
+}
+
+model Movie {
+  id             String    @id @default(uuid())
+  imdbId         String?   @unique @map("imdb_id")
+  tmdbId         Int?      @unique @map("tmdb_id")
+  title          String
+  releaseYear    Int       @map("release_year")
+  runtimeMinutes Int?      @map("runtime_minutes")
+  synopsis       String?
+  posterUrl      String?   @map("poster_url")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  cast              MovieCast[]
+  directors         MovieDirector[]
+  genres            MovieGenre[]
+  externalRatings   MovieExternalRating[]
+  collectionMovies  CollectionMovie[]
+  ratings           UserMovieRating[]
+  reviews           Review[]
+  hiddenBy          UserHiddenMovie[]
+
+  @@map("movies")
+}
+
+model Person {
+  id   String @id @default(uuid())
+  name String
+
+  castAsActor   MovieCast[]     @relation("CastPerson")
+  directedFilms MovieDirector[] @relation("DirectorPerson")
+
+  @@map("people")
+}
+
+model Genre {
+  id   String @id @default(uuid())
+  name String @unique
+
+  movies MovieGenre[]
+
+  @@map("genres")
+}
+
+model MovieCast {
+  id            String  @id @default(uuid())
+  movieId       String  @map("movie_id")
+  personId      String  @map("person_id")
+  characterName String? @map("character_name")
+
+  movie  Movie  @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  person Person @relation("CastPerson", fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([movieId, personId, characterName])
+  @@map("movie_cast")
+}
+
+model MovieDirector {
+  movieId  String @map("movie_id")
+  personId String @map("person_id")
+
+  movie    Movie   @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  director Person @relation("DirectorPerson", fields: [personId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, personId])
+  @@map("movie_directors")
+}
+
+model MovieGenre {
+  movieId String @map("movie_id")
+  genreId String @map("genre_id")
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  genre Genre @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, genreId])
+  @@map("movie_genres")
+}
+
+model MovieExternalRating {
+  id          String               @id @default(uuid())
+  movieId     String               @map("movie_id")
+  source      ExternalRatingSource
+  ratingValue Float                @map("rating_value")
+  ratingScale Int                  @map("rating_scale")
+  ratingRaw   String?              @map("rating_raw")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([movieId, source])
+  @@map("movie_external_ratings")
+}
+
+model UserCollection {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  slug      String   @unique
+  title     String
+  isPublic  Boolean  @default(false) @map("is_public")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movies  CollectionMovie[]
+
+  @@map("user_collections")
+}
+
+model CollectionMovie {
+  collectionId String   @map("collection_id")
+  movieId      String   @map("movie_id")
+  addedAt      DateTime @default(now()) @map("added_at")
+  notes        String?
+
+  collection UserCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  movie      Movie          @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, movieId])
+  @@map("collection_movies")
+}
+
+model UserMovieRating {
+  userId    String   @map("user_id")
+  movieId   String   @map("movie_id")
+  rating    Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@id([userId, movieId])
+  @@map("user_movie_ratings")
+}
+
+/// Movies the user explicitly removed from their catalog (still allowed to re-import).
+model UserHiddenMovie {
+  userId   String   @map("user_id")
+  movieId  String   @map("movie_id")
+  hiddenAt DateTime @default(now()) @map("hidden_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@id([userId, movieId])
+  @@map("user_hidden_movies")
+}
+
+model AuditLog {
+  id            String          @id @default(uuid())
+  userId        String          @map("user_id")
+  actionType    AuditActionType @map("action_type")
+  resourceType  String          @map("resource_type")
+  resourceId    String?         @map("resource_id")
+  resourceLabel String?         @map("resource_label")
+  metadata      Json?           @map("metadata")
+  createdAtUtc  DateTime        @default(now()) @map("created_at_utc")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAtUtc])
+  @@map("audit_logs")
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  movieId   String   @map("movie_id")
+  title     String?
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@index([movieId])
+  @@map("reviews")
+}
+
+model LlmProvider {
+  id          String   @id @default(uuid())
+  providerKey String   @unique @map("provider_key")
+  displayName String   @map("display_name")
+  isEnabled   Boolean  @default(true) @map("is_enabled")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  models               LlmModel[]
+  settingsAsProvider AppSettings[] @relation("ActiveProvider")
+
+  @@map("llm_providers")
+}
+
+model LlmModel {
+  id                     String   @id @default(uuid())
+  providerId             String   @map("provider_id")
+  modelKey               String   @map("model_key")
+  isEnabled              Boolean  @default(true) @map("is_enabled")
+  inputCostPer1mTokens   Float?   @map("input_cost_per_1m_tokens")
+  outputCostPer1mTokens  Float?   @map("output_cost_per_1m_tokens")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  provider         LlmProvider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  settingsAsModel  AppSettings[] @relation("ActiveModel")
+
+  @@unique([providerId, modelKey])
+  @@map("llm_models")
+}
+
+/// Singleton row — use id = "default"
+model AppSettings {
+  id                   String    @id @default("default")
+  activeLlmProviderId  String    @map("active_llm_provider_id")
+  activeLlmModelId     String    @map("active_llm_model_id")
+  updatedByUserId      String?   @map("updated_by_user_id")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  activeProvider LlmProvider @relation("ActiveProvider", fields: [activeLlmProviderId], references: [id])
+  activeModel    LlmModel    @relation("ActiveModel", fields: [activeLlmModelId], references: [id])
+  updatedBy      User?       @relation("AppSettingsUpdatedBy", fields: [updatedByUserId], references: [id])
+
+  @@map("app_settings")
+}

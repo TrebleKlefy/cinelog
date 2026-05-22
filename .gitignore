@@ -1,0 +1,31 @@
+# Monorepo-wide ignores (root is the Git repo for backend + ui + docs)
+
+# Dependencies
+node_modules/
+
+# Environment & local secrets
+.env
+.env.*
+!.env.example
+
+# Builds
+dist/
+**/dist/
+
+# Coverage & test output
+coverage/
+**/coverage/
+*.lcov
+
+# TypeScript / tooling cache
+*.tsbuildinfo
+.cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editors
+.DS_Store
+.idea/
+*.sw?

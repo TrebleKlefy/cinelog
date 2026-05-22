@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: movietracker-db
+    environment:
+      POSTGRES_USER: movietracker
+      POSTGRES_PASSWORD: movietracker
+      POSTGRES_DB: movietracker
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
