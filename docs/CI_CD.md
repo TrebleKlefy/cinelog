@@ -1,135 +1,115 @@
-# CI/CD (GitHub Actions)
+# CI/CD (GitHub Actions + AWS)
 
-This repo uses **[GitHub Actions](https://docs.github.com/en/actions)** to run tests + coverage gates on **every push and every pull request**, and to trigger **automated deployments** when changes land on the default branch.
+GitHub Actions runs tests and **≥80% coverage** thresholds on **[every push and every pull request](https://docs.github.com/en/actions)** (`on: [push, pull_request]` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)).
 
-## Workflow file
-
-- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) — install, migrate/seed DB (backend job), **`npm run test:coverage`** (backend + UI), integration tests against Postgres, optional **deploy** step.
-
-Jobs run in parallel where possible; **deploy** waits for both **backend** and **ui** to succeed.
-
-## CI: tests and 80% coverage
-
-| Package   | Command                 | Enforcement |
-|----------|-------------------------|-------------|
-| Backend  | `npm run test:coverage` | Vitest **lines, statements, functions, and branches** must be **≥ 80%** (`backend/vitest.config.ts` `coverage.thresholds`). |
-| UI       | `npm run test:coverage` | Vitest **lines, statements, functions, and branches** must be **≥ 80%** (`ui/vitest.config.ts` `coverage.thresholds`). |
-
-If any threshold is not met, Vitest exits non‑zero and the workflow **fails**.
-
-### Backend integration tests
-
-The backend job starts **Postgres 16**, sets `DATABASE_URL`, runs `prisma migrate deploy`, seeds the DB, then runs:
-
-- `npm run test:coverage`
-- `RUN_DB_INTEGRATION=true npm run test:integration`
-
-### Coverage artefacts
-
-On pull requests and on pushes to `main` / `master`, HTML/LCOV coverage output is uploaded as workflow **artefacts** (`backend-coverage`, `ui-coverage`) for 14 days.
-
-## CD: deployment (Render deploy hooks)
-
-We use **[Render](https://render.com)** as the reference hosting model: one **Web Service** (Node API) and one **Static Site** (Vite build). Render can rebuild/redeploy when it receives an HTTP **POST** to a service-specific **Deploy Hook** URL.
-
-### 1. Create services on Render (one-time)
-
-1. **API (Web Service)**  
-   - Root directory: `backend`  
-   - Build: e.g. `npm ci && npx prisma generate && npm run build`  
-   - Start: e.g. `npx prisma migrate deploy && node dist/index.js` (or your chosen start command)  
-   - Set **environment variables** (see below) in the Render dashboard.
-
-2. **UI (Static Site)**  
-   - Root directory: `ui`  
-   - Build: e.g. `npm ci && npm run build`  
-   - Publish directory: `dist` (Vite default)  
-   - Set **`VITE_API_URL`** to your **public API base URL** (e.g. `https://your-api.onrender.com`).
-
-3. In each service, open **Settings → Deploy Hook**, create a hook, and copy the URL.
-
-### 2. Configure GitHub repository secrets
-
-In **GitHub → Settings → Secrets and variables → Actions**:
-
-| Secret | Purpose |
-|--------|---------|
-| `RENDER_DEPLOY_HOOK_API` | POST URL that triggers redeploy of the **backend** Render service |
-| `RENDER_DEPLOY_HOOK_UI` | POST URL that triggers redeploy of the **UI** Static Site |
-
-If either secret is **missing**, the **deploy** job still runs but **skips** the HTTP POST steps and prints a **notice** in the Actions log. Add both secrets when you want real deploys after every successful push to **`main`** or **`master`**.
-
-Deploy runs only on **`push`** to **`main`** or **`master`** (not on pull requests).
-
-### Alternative platforms
-
-The same CI job can drive other hosts by swapping the deploy step:
-
-- **Railway / Fly.io / Google Cloud Run / AWS ECS**: use their CLI or API in a workflow step with a token stored as **`RAILWAY_TOKEN`**, **`FLY_API_TOKEN`**, etc., instead of curl to Render hooks.
-- **Vercel (UI)** + API elsewhere: **`vercel pull && vercel build && vercel deploy --prod --token`** with **`VERCEL_ORG_ID`**, **`VERCEL_PROJECT_ID`**, **`VERCEL_TOKEN`**.
-
-Keep tokens in **Secrets**, never commit them.
+Production **deploy runs only on push to `main` or `master`**, after **backend** and **ui** jobs succeed.
 
 ---
 
-## Runtime environment variables (staging / production)
+## CI: unit tests & coverage gates
 
-Mirrors **`backend/.env.example`**. Configure these on the **API host** (e.g. Render Web Service dashboard).
+| Area | Command in CI | Config |
+|------|----------------|--------|
+| Backend | `npm run test:coverage` | [`backend/vitest.config.ts`](../backend/vitest.config.ts): lines/statements/functions/branches **≥ 80%** |
+| Backend DB probes | `RUN_DB_INTEGRATION=true npm run test:integration` | Postgres **service** container in Actions |
+| UI | `npm run build`, `npm run test:coverage` | [`ui/vitest.config.ts`](../ui/vitest.config.ts): **≥ 80%** on its `coverage.include` slice |
 
-### Required for a working API
+Failing thresholds cause **Vitest exit code ≠ 0** → workflow **fails**.
 
-| Variable | Purpose |
-|----------|---------|
-| `DATABASE_URL` | Postgres connection string for production/staging |
-
-### Recommended
-
-| Variable | Purpose |
-|----------|---------|
-| `JWT_ACCESS_SECRET` | Signing key for access tokens |
-| `JWT_REFRESH_SECRET` | Signing key for refresh tokens |
-| `CORS_ORIGINS` | Allowed browser origins for the deployed UI |
-
-### Optional (features degrade gracefully without them)
-
-| Variable | Purpose |
-|----------|---------|
-| `OPENAI_API_KEY`, `GROQ_API_KEY`, … | Live LLM / AI routes |
-| `OMDB_API_KEY`, `TMDB_API_KEY` / `TMDB_READ_ACCESS_TOKEN` | External movie metadata |
+**Artefacts** (PR / `main` / `master`): `backend-coverage`, `ui-coverage` uploads for debugging.
 
 ---
 
-## Frontend build (`ui`)
+## CD: AWS (primary)
 
-Static hosting needs the API URL **at build time** for `import.meta.env.VITE_*`:
+The **deploy** job picks the target automatically:
 
-| Variable | Purpose |
-|----------|---------|
-| `VITE_API_URL` | Base URL of the deployed API (e.g. `https://api.example.com`) |
+| Priority | When it runs |
+|----------|----------------|
+| **1. AWS** | `secrets.AWS_ROLE_ARN` **and** `secrets.AWS_ECR_REPOSITORY` are set |
+| **2. Render (legacy)** | Otherwise, if **`RENDER_DEPLOY_HOOK_API`** and **`RENDER_DEPLOY_HOOK_UI`** are both set → POST hooks |
+| **3. Notice** | If neither bundle is configured → workflow logs a skip **notice** (does not fail the job) |
 
-Set this on **Render Static Site → Environment**, or in the CI build step env if you build in Actions and upload artefacts.
+### What the AWS path does
+
+1. **OIDC** — [`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials) assumes your IAM role (no static `AWS_ACCESS_KEY_ID` required in-repo).
+2. **ECR** — Creates the repository if missing, then **`docker build -f backend/Dockerfile`** (context **`backend/`**), **`docker push`** both **`${GIT_SHA}`** and **`:latest`**.
+3. **Rollout (pick one)**  
+   - **ECS Fargate / EC2 launch type:** set **`AWS_ECS_CLUSTER_NAME`** + **`AWS_ECS_SERVICE_NAME`** → **`aws ecs update-service --force-new-deployment`**. Ensure the task definition points at **the pushed image**.  
+   - **App Runner:** set **`AWS_APP_RUNNER_SERVICE_ARN`** → **`aws apprunner start-deployment`** *or* enable **automatic deploy from ECR** so a push to `:latest` is enough without the ARN secret.
+4. **Static UI (optional)** — if **`AWS_S3_UI_BUCKET`** is set:
+   - Requires **`AWS_PUBLIC_API_URL_FOR_UI_BUILD`** → passed as **`VITE_API_URL`** during `vite build`.
+   - Syncs **`ui/dist`** → **S3** (`aws s3 sync … --delete`).
+   - Optionally **`AWS_CLOUDFRONT_DISTRIBUTION_ID`** → invalidates **`/*`**.
+
+Script: [`scripts/deploy-aws-production.sh`](../scripts/deploy-aws-production.sh).
+
+**API container:** [`backend/Dockerfile`](../backend/Dockerfile) runs **`prisma migrate deploy`** before **`node dist/index.js`**. Provide **`DATABASE_URL`** (RDS) at runtime via ECS task definition / App Runner env / Secrets Manager.
 
 ---
 
-## Local parity with CI
+### One-time AWS + GitHub OIDC checklist
 
-Backend:
+These steps happen in AWS Console / IaC tools; values then map to repo **Secrets** / **Variables**.
+
+1. **Amazon ECR**  
+   Repository name matching **`AWS_ECR_REPOSITORY`** secret (script can auto-create repo if IAM allows `ecr:CreateRepository`).
+
+2. **IAM role for GitHub Actions (OIDC)**  
+   - Create an IAM **OpenID Connect** identity provider: `token.actions.githubusercontent.com` (issuer + thumbprints per [AWS docs](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html)).  
+   - Create role **trusted** for **`sts:AssumeRoleWithWebIdentity`** with condition **`StringLike`: `repo:OWNER/REPO:*`** (narrow to **`ref:refs/heads/main`** when possible).  
+   - Attach policies (inline or managed) minimally like:
+     - **ECR:** `GetAuthorizationToken`, push/pull on your repo ARN  
+     - **ECS:** `ecs:UpdateService`, `ecs:DescribeServices` … on your cluster/service  
+     - **App Runner:** `apprunner:StartDeployment`  
+     - **S3 / CloudFront** (only if deploying UI bucket)
+
+3. **GitHub Secrets** (`Settings → Secrets and variables → Actions`)
+
+| Secret | Required for AWS deploy? | Purpose |
+|--------|--------------------------|---------|
+| `AWS_ROLE_ARN` | **Yes** (with ECR repo) | IAM role ARN OIDC assumption |
+| `AWS_ECR_REPOSITORY` | **Yes** | Repo name segment only (e.g. `cinelog-api`) |
+| `AWS_ECS_CLUSTER_NAME` | No* | ECS cluster with API service |
+| `AWS_ECS_SERVICE_NAME` | No* | Service to roll |
+| `AWS_APP_RUNNER_SERVICE_ARN` | No* | App Runner service ARN for `start-deployment` |
+| `AWS_S3_UI_BUCKET` | No | UI static bucket name |
+| `AWS_PUBLIC_API_URL_FOR_UI_BUILD` | If S3 sync | **`https://`** public API URL for **VITE_API_URL** at build |
+| `AWS_CLOUDFRONT_DISTRIBUTION_ID` | No | UI CDN invalidation |
+
+\* At least **one** rollout mechanism (ECS pair, App Runner ARN, or console **auto-deploy** from ECR) should be wired so production sees new images.
+
+4. **GitHub Variables** (`Settings → Secrets and variables → Actions → Variables`)
+
+| Variable | Purpose |
+|---------|---------|
+| `AWS_DEPLOY_REGION` | Default **`us-east-1`** when unset; OIDC session + `aws` CLI calls use this |
+
+5. **Runtime env for the API container** — set **outside** CI (RDS URL, JWT secrets, CORS origins, optional LLM keys). Mirror [`backend/.env.example`](../backend/.env.example).
+
+6. **`PORT`** — App Runner / many ALBs expect **8080**. Set **`PORT=8080`** in the task/App Runner env or map the target group to **4000** if you leave the default ([`backend/src/index.ts`](../backend/src/index.ts)).
+
+---
+
+## CD: Render (optional fallback)
+
+If you still use Render deploy hooks, set **`RENDER_DEPLOY_HOOK_API`** and **`RENDER_DEPLOY_HOOK_UI`** and **omit** **`AWS_ROLE_ARN`** **or** **`AWS_ECR_REPOSITORY`** so the router chooses Render (otherwise AWS wins).
+
+---
+
+## Local parity & Docker smoke test
 
 ```bash
-cd backend
-npm ci
-npx prisma generate
-DATABASE_URL='postgresql://...' npx prisma migrate deploy
-DATABASE_URL='postgresql://...' npm run db:seed
-npm run test:coverage
-RUN_DB_INTEGRATION=true DATABASE_URL='postgresql://...' npm run test:integration
+docker build -f backend/Dockerfile -t cinelog-api:local backend
+docker run --rm -e DATABASE_URL="postgresql://…" -e PORT=4000 -p 4000:4000 cinelog-api:local
 ```
 
-UI:
+---
 
-```bash
-cd ui
-npm ci
-npm run build
-npm run test:coverage
-```
+## Frontend build note
+
+[Vite](https://vitejs.dev) bakes **`VITE_API_URL`** at build time. For S3/deploy-from-Actions, **`AWS_PUBLIC_API_URL_FOR_UI_BUILD`** must be the HTTPS origin users hit for the API (no trailing **`/api`** unless your client code expects that).
+
+---
+
+More project context: [README.md](../README.md).

@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+*.log
+.env
+.env.*
+.git
+.gitignore
+**/*.test.ts
+vitest.config.ts
+vitest.integration.config.ts
+vitest.setup.ts
+src/integration

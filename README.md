@@ -69,9 +69,9 @@ Reports: `backend/coverage/` and `ui/coverage/` (also uploaded as Actions artefa
 
 On **every push and pull request**, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the backend job (Postgres service, **`prisma migrate deploy`**, seed), **`npm run test:coverage`** for backend and UI, then **`RUN_DB_INTEGRATION=true`** integration tests.
 
-On **`push`** to **`main`** or **`master`** only (after CI passes), a **deploy** job POSTs **[Render Deploy Hook](https://render.com/docs/deploy-hooks)** URLs from repository secrets **`RENDER_DEPLOY_HOOK_API`** and **`RENDER_DEPLOY_HOOK_UI`**. Without those secrets, deploy is skipped with a notice in the log.
+On **`push`** to **`main`** or **`master`** only (after CI passes), a **deploy** job prefers **AWS** when **`AWS_ROLE_ARN`** and **`AWS_ECR_REPOSITORY`** [secrets](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions) are set: **OIDC** → **Docker build** ([`backend/Dockerfile`](backend/Dockerfile)) → **Amazon ECR** push → optional **ECS** service roll **or** **App Runner** deployment **or** **S3 + CloudFront** for the UI. Otherwise it falls back to **Render deploy hooks** if both **`RENDER_DEPLOY_HOOK_*`** URLs are configured; otherwise it logs a **notice** without failing.
 
-Full pipeline setup, alternatives (Railway/Fly/Vercel), runtime env vars for production UI/API: **`docs/CI_CD.md`**.
+Full IAM/OIDC setup, secrets/variables tables, **`PORT`/RDS/CORS**, and Dockerfile notes: **`docs/CI_CD.md`**.
 
 ## Seeded demo users
 

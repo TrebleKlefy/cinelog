@@ -85,7 +85,7 @@ jobs:
           if-no-files-found: ignore
 
   deploy:
-    name: Deploy (Render hooks)
+    name: Deploy production (AWS / Render fallback)
     needs: [backend, ui]
     if: >-
       github.event_name == 'push'
@@ -94,20 +94,67 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
+
+    env:
+      # Non-secret AWS region selector (repository variable); override defaults in Actions → Variables.
+      DEPLOY_AWS_REGION: ${{ vars.AWS_DEPLOY_REGION || 'us-east-1' }}
 
     steps:
-      - name: Trigger production deploy hooks
+      - uses: actions/checkout@v4
+
+      - name: Choose deploy target (without logging secrets)
+        id: deploy_route
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          RENDER_HOOK_API: ${{ secrets.RENDER_DEPLOY_HOOK_API }}
+          RENDER_HOOK_UI: ${{ secrets.RENDER_DEPLOY_HOOK_UI }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          TARGET="notice"
+          if [ -n "$ROLE_ARN" ] && [ -n "${ECR_REPOSITORY:-}" ]; then
+            TARGET="aws"
+          elif [ -n "$RENDER_HOOK_API" ] && [ -n "$RENDER_HOOK_UI" ]; then
+            TARGET="render"
+          fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.deploy_route.outputs.target == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.DEPLOY_AWS_REGION }}
+
+      - name: Build & push container; optional ECS/App Runner/UI sync
+        if: steps.deploy_route.outputs.target == 'aws'
+        env:
+          AWS_REGION_SECRET: ${{ env.DEPLOY_AWS_REGION }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECS_CLUSTER_NAME: ${{ secrets.AWS_ECS_CLUSTER_NAME }}
+          ECS_SERVICE_NAME: ${{ secrets.AWS_ECS_SERVICE_NAME }}
+          AWS_APP_RUNNER_SERVICE_ARN: ${{ secrets.AWS_APP_RUNNER_SERVICE_ARN }}
+          AWS_S3_UI_BUCKET: ${{ secrets.AWS_S3_UI_BUCKET }}
+          VITE_PUBLIC_API_URL: ${{ secrets.AWS_PUBLIC_API_URL_FOR_UI_BUILD }}
+          AWS_CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.AWS_CLOUDFRONT_DISTRIBUTION_ID }}
+        run: bash scripts/deploy-aws-production.sh "${GITHUB_SHA}"
+
+      - name: Trigger Render deploy hooks (legacy fallback)
+        if: steps.deploy_route.outputs.target == 'render'
         env:
           HOOK_API: ${{ secrets.RENDER_DEPLOY_HOOK_API }}
           HOOK_UI: ${{ secrets.RENDER_DEPLOY_HOOK_UI }}
         run: |
           set -eu
-          if [ -z "${HOOK_API:-}" ] || [ -z "${HOOK_UI:-}" ]; then
-            echo "::notice title=Deploy skipped::Add repository secrets RENDER_DEPLOY_HOOK_API and RENDER_DEPLOY_HOOK_UI to POST to Render Deploy Hooks after each passing main branch build (see docs/CI_CD.md)."
-            exit 0
-          fi
           echo "Posting API deploy hook …"
           curl -fsS -m 600 -X POST "$HOOK_API"
           echo "Posting UI deploy hook …"
           curl -fsS -m 600 -X POST "$HOOK_UI"
-          echo "Deploy hooks acknowledged."
+
+      - name: No automated deploy secrets configured
+        if: steps.deploy_route.outputs.target == 'notice'
+        run: >-
+          echo '::notice title=Production deploy skipped::Configure GitHub Secrets for AWS
+          (AWS_ROLE_ARN + AWS_ECR_REPOSITORY, plus ECS or App Runner and optional S3/CloudFront) — see docs/CI_CD.md.
+          Optionally set Render deploy hooks instead.'
