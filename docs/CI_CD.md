@@ -4,6 +4,8 @@ GitHub Actions runs tests and **≥80% coverage** thresholds on **[every push an
 
 Production **deploy runs only on push to `main` or `master`**, after **backend** and **ui** jobs succeed.
 
+**AWS step-by-step (console clicks + IAM snippets): [AWS_DEPLOYMENT_GUIDE.md](AWS_DEPLOYMENT_GUIDE.md)** — ECS vs App Runner; S3+CloudFront vs Amplify UI.
+
 ---
 
 ## CI: unit tests & coverage gates
