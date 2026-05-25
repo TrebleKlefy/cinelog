@@ -21,6 +21,7 @@ const prisma = vi.hoisted(() => ({
   user: {
     count: vi.fn(),
     findMany: vi.fn(),
+    findUnique: vi.fn(),
   },
   movie: {
     count: vi.fn(),
@@ -56,6 +57,11 @@ describe("/api/admin", () => {
     prisma.llmProvider.findUnique.mockReset();
     prisma.user.count.mockReset();
     prisma.user.findMany.mockReset();
+    prisma.user.findUnique.mockReset().mockResolvedValue({
+      id: adminId,
+      email: "boss@test.dev",
+      role: "ADMIN",
+    });
     prisma.movie.count.mockReset();
     prisma.userCollection.count.mockReset();
 
@@ -265,9 +271,15 @@ describe("/api/admin", () => {
   });
 
   it("responds 403 for non-admin callers", async () => {
+    const plebId = randomUUID();
+    prisma.user.findUnique.mockResolvedValueOnce({
+      id: plebId,
+      email: "user@test.dev",
+      role: "USER",
+    });
     const userHeaders = {
       Authorization: `Bearer ${signAccessToken({
-        sub: randomUUID(),
+        sub: plebId,
         email: "user@test.dev",
         role: "USER",
       })}`,

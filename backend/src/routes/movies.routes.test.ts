@@ -10,9 +10,13 @@ const movieFindMany = vi.hoisted(() => vi.fn());
 const movieFindUnique = vi.hoisted(() => vi.fn());
 const userRatingFindUnique = vi.hoisted(() => vi.fn());
 const hiddenDeleteMany = vi.hoisted(() => vi.fn());
+const userFindUnique = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/prisma.js", () => ({
   prisma: {
+    user: {
+      findUnique: userFindUnique,
+    },
     movie: {
       count: movieCount,
       findMany: movieFindMany,
@@ -83,6 +87,11 @@ describe("/api/movies routes", () => {
 
   beforeEach(() => {
     app = createApp();
+    userFindUnique.mockReset().mockImplementation(async ({ where: { id } }: { where: { id: string } }) => ({
+      id,
+      email: `${id.slice(0, 6)}@test.dev`,
+      role: "USER",
+    }));
     catalogWhere.mockReset().mockResolvedValue({ id: { in: [movieId] } });
     catalogAccess.mockReset().mockResolvedValue(true);
     movieCount.mockReset().mockResolvedValue(1);

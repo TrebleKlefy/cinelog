@@ -16,9 +16,13 @@ const ratingDeleteMany = vi.hoisted(() => vi.fn());
 const auditCount = vi.hoisted(() => vi.fn());
 const auditMany = vi.hoisted(() => vi.fn());
 const upsertHidden = vi.hoisted(() => vi.fn());
+const userFindUnique = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/prisma.js", () => ({
   prisma: {
+    user: {
+      findUnique: userFindUnique,
+    },
     userCollection: {
       findFirst: collFindFirst,
       create: collCreate,
@@ -64,6 +68,11 @@ describe("/api/me", () => {
 
   beforeEach(() => {
     app = createApp();
+    userFindUnique.mockReset().mockResolvedValue({
+      id: userId,
+      email: "me@test.dev",
+      role: "USER",
+    });
     collFindFirst.mockReset();
     collCreate.mockReset().mockResolvedValue({
       id: collId,

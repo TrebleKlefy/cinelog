@@ -8,6 +8,7 @@ import * as llm from "../services/llm.js";
 import * as bootstrap from "../services/movieAgentBootstrap.js";
 
 const prisma = vi.hoisted(() => ({
+  user: { findUnique: vi.fn() },
   movie: { findMany: vi.fn() },
   userMovieRating: { findMany: vi.fn() },
   userCollection: { findFirst: vi.fn() },
@@ -51,6 +52,11 @@ describe("/api/ai", () => {
 
   beforeEach(() => {
     app = createApp();
+    prisma.user.findUnique.mockReset().mockResolvedValue({
+      id: userId,
+      email: "ai-user@test.dev",
+      role: "USER",
+    });
     prisma.userMovieRating.findMany.mockReset().mockResolvedValue([]);
     prisma.appSettings.findUniqueOrThrow.mockReset().mockResolvedValue({
       activeProvider: { providerKey: "groq" },
