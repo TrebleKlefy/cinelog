@@ -24,7 +24,7 @@ export function createApp() {
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, message: "Hello World I am Akeem Shaw" });
+    res.json({ ok: true, status: "healthy" });
   });
 
   app.use("/api/auth", authRouter);
