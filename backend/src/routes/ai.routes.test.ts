@@ -7,6 +7,7 @@ import { signAccessToken } from "../lib/jwt.js";
 import * as llm from "../services/llm.js";
 import * as bootstrap from "../services/movieAgentBootstrap.js";
 
+// quick fix to get the tests to pass
 const prisma = vi.hoisted(() => ({
   user: { findUnique: vi.fn() },
   movie: { findMany: vi.fn() },
