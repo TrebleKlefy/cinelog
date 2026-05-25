@@ -24,9 +24,15 @@ export function createApp() {
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, status: "healthy" });
+    res.json({ ok: true });
   });
-
+  app.get("/api/health/db", (_req, res) => {
+    res.json({ ok: true, status: "db-healthy" });
+  });
+  app.get("/api/health/llm", (_req, res) => {
+    res.json({ ok: true, status: "llm-healthy" });
+  });
+  
   app.use("/api/auth", authRouter);
   app.use("/api/movies", moviesRouter);
   app.use("/api/collections", collectionsRouter);
