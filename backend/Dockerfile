@@ -39,4 +39,4 @@ ENV PORT=4000
 EXPOSE 4000
 
 ENTRYPOINT ["sh", "-ec"]
-CMD ["exec npx prisma migrate deploy && exec node dist/index.js"]
+CMD ["npx prisma migrate deploy && exec node dist/index.js"]
