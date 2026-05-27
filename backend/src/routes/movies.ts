@@ -4,12 +4,13 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth } from "../middleware/auth.js";
-import { movieVisibilityWhere, userCanAccessMovie } from "../services/movieCatalogScope.js";
+import { movieVisibilityWhere, userCanAccessMovie, collectAccessibleTmdbIds } from "../services/movieCatalogScope.js";
 import { writeAuditLog } from "../services/auditLog.js";
 import { importMovieFromOmdb } from "../services/movieImportOmdb.js";
-import { importMovieFromTmdb } from "../services/movieImportTmdb.js";
+import { quickImportMovieFromTmdb } from "../services/movieImportTmdb.js";
+import { scheduleMovieImportEnrichment } from "../services/movieImportQueue.js";
 import { omdbGetByImdbId, omdbSearch } from "../services/omdb.js";
-import { tmdbFetchMovieImportPayload, tmdbSearchForUiPage, tmdbTrendingForUiPage } from "../services/tmdb.js";
+import { tmdbBrowseForUiPage, tmdbFetchMovieImportPayload, tmdbMovieGenreNames, tmdbSearchForUiPage, tmdbTrendingForUiPage } from "../services/tmdb.js";
 
 export const moviesRouter = Router();
 
@@ -108,6 +109,83 @@ moviesRouter.get("/external/tmdb/search", async (req: Request, res, next) => {
   }
 });
 
+/** TMDB browse: trending by default, title search, and/or cast/director/genre filters. */
+moviesRouter.get("/external/tmdb/browse", async (req: Request, res, next) => {
+  try {
+    const querySchema = z.object({
+      q: z.string().optional(),
+      cast: z.string().optional(),
+      director: z.string().optional(),
+      genre: z.string().optional(),
+      page: z.coerce.number().int().min(1).optional().default(1),
+      pageSize: z.coerce.number().int().min(1).max(50).optional().default(28),
+    });
+    const q = querySchema.parse(req.query);
+
+    const header = req.headers.authorization;
+    let userId: string | undefined;
+    if (header?.startsWith("Bearer ")) {
+      try {
+        const { verifyAccessToken } = await import("../lib/jwt.js");
+        const payload = verifyAccessToken(header.slice("Bearer ".length));
+        userId = payload.sub;
+      } catch {
+        userId = undefined;
+      }
+    }
+
+    const result = await tmdbBrowseForUiPage({
+      q: q.q,
+      cast: q.cast,
+      director: q.director,
+      genre: q.genre,
+      uiPage: q.page,
+      pageSize: q.pageSize,
+    });
+
+    let items = result.items;
+    if (userId) {
+      const catalogTmdbIds = new Set(await collectAccessibleTmdbIds(userId));
+      items = result.items.map((item) => ({
+        ...item,
+        inCatalog: catalogTmdbIds.has(item.tmdbId),
+      }));
+    }
+
+    const hasFilters = Boolean(q.q?.trim() || q.cast?.trim() || q.director?.trim() || q.genre?.trim());
+    if (userId && hasFilters) {
+      await writeAuditLog({
+        userId,
+        actionType: "SEARCH_STRUCTURED",
+        resourceType: "movie_external",
+        resourceLabel: [q.q, q.cast, q.director, q.genre].filter(Boolean).join(" · ") || "browse",
+        metadata: {
+          provider: "tmdb",
+          page: q.page,
+          pageSize: q.pageSize,
+          total: result.total,
+          cast: q.cast,
+          director: q.director,
+          genre: q.genre,
+        },
+      });
+    }
+
+    res.json({ ...result, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+moviesRouter.get("/external/tmdb/genres", async (_req, res, next) => {
+  try {
+    const items = await tmdbMovieGenreNames();
+    res.json({ items });
+  } catch (e) {
+    next(e);
+  }
+});
+
 moviesRouter.get("/external/tmdb/movie/:tmdbId", async (req, res, next) => {
   try {
     const tmdbId = z.coerce.number().int().positive().parse(req.params.tmdbId);
@@ -190,7 +268,7 @@ moviesRouter.post("/import/tmdb", requireAuth, async (req, res, next) => {
     const body = schema.parse(req.body);
     const userId = req.user!.id;
 
-    const result = await importMovieFromTmdb(body.tmdbId);
+    const result = await quickImportMovieFromTmdb(body.tmdbId);
 
     await writeAuditLog({
       userId,
@@ -209,7 +287,35 @@ moviesRouter.post("/import/tmdb", requireAuth, async (req, res, next) => {
       where: { userId, movieId: result.movie.id },
     });
 
-    res.status(result.created ? 201 : 200).json(result);
+    scheduleMovieImportEnrichment(body.tmdbId);
+
+    res.status(result.created ? 201 : 200).json({ ...result, enrichment: "pending" as const });
+  } catch (e) {
+    next(e);
+  }
+});
+
+moviesRouter.get("/genres", requireAuth, async (req: Request, res, next) => {
+  try {
+    const viewer = req.user!;
+    const visibility = await movieVisibilityWhere(viewer.role, viewer.id);
+    const rows = await prisma.genre.findMany({
+      where: visibility
+        ? {
+            movies: {
+              some: {
+                movie: visibility,
+              },
+            },
+          }
+        : undefined,
+      orderBy: { name: "asc" },
+      select: { name: true },
+    });
+
+    res.json({
+      items: rows.map((r) => r.name),
+    });
   } catch (e) {
     next(e);
   }
@@ -236,7 +342,7 @@ moviesRouter.get("/", requireAuth, async (req: Request, res, next) => {
       filters.push({
         genres: {
           some: {
-            genre: { name: { equals: q.genre, mode: "insensitive" as const } },
+            genre: { name: { contains: q.genre, mode: "insensitive" as const } },
           },
         },
       });

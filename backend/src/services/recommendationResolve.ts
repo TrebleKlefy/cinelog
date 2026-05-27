@@ -1,8 +1,6 @@
-import { prisma } from "../lib/prisma.js";
 import { tmdbSearchMovies, type TmdbMovieBrowseItem } from "./tmdb.js";
 import {
   chatCompletionActiveModel,
-  findCatalogMatch,
   normalizeRecommendationsFromParse,
   normalizeTitleForMatch,
   parseJsonFromLlmText,
@@ -73,27 +71,7 @@ export async function resolveTitleToTmdbBest(title: string, year?: number): Prom
   }
 }
 
-async function hydrateCatalogRow(cat: { id: string; title: string; year: number }, why: string): Promise<RecommendationRow> {
-  const movie = await prisma.movie.findUnique({
-    where: { id: cat.id },
-    select: { posterUrl: true, title: true, releaseYear: true },
-  });
-  return {
-    title: movie?.title ?? cat.title,
-    year: movie?.releaseYear ?? cat.year,
-    movieId: cat.id,
-    tmdbId: null,
-    posterUrl: movie?.posterUrl ?? null,
-    why,
-  };
-}
-
-async function enrichSuggestionRaw(raw: RawRec, catalog: Array<{ id: string; title: string; year: number }>): Promise<RecommendationRow | null> {
-  const catHit = findCatalogMatch(raw.title, raw.year, catalog);
-  if (catHit) {
-    return hydrateCatalogRow(catHit, raw.why);
-  }
-
+async function enrichSuggestionRaw(raw: RawRec): Promise<RecommendationRow | null> {
   const tmdb = await resolveTitleToTmdbBest(raw.title, raw.year);
   if (!tmdb) return null;
 
@@ -166,34 +144,16 @@ RULES:
   return { system, user };
 }
 
-async function appendCatalogBackup(
-  catalog: Array<{ id: string; title: string; year: number }>,
-  final: RecommendationRow[],
-  acceptedCatalogIds: Set<string>,
-): Promise<void> {
-  for (const c of catalog) {
-    if (final.length >= TARGET_COUNT) break;
-    if (acceptedCatalogIds.has(c.id)) continue;
-    acceptedCatalogIds.add(c.id);
-    const hydrated = await hydrateCatalogRow(
-      { id: c.id, title: c.title, year: c.year },
-      "Pulled from your catalog to preserve seven visible slots after TMDB-guided discovery.",
-    );
-    final.push(hydrated);
-  }
-}
-
 /**
- * Runs the live LLM + TMDB resolution loop (+ TMDB-guided replacement passes capped at MAX_REPLACEMENT_LLM_ROUNDS), then optional catalog fillers.
+ * Runs the live LLM + TMDB resolution loop (+ TMDB-guided replacement passes capped at MAX_REPLACEMENT_LLM_ROUNDS).
  */
 export async function runLiveRecommendationsWithTmdbRetry(
   params: {
     historyContext: string;
-    catalog: Array<{ id: string; title: string; year: number }>;
   },
   config: ActiveLlmConfig,
 ): Promise<RecommendationsResult> {
-  const { historyContext, catalog } = params;
+  const { historyContext } = params;
 
   const initialMsgs = buildInitialMessages(historyContext);
   const initialText = await chatCompletionActiveModel(config, initialMsgs.system, initialMsgs.user);
@@ -220,7 +180,6 @@ export async function runLiveRecommendationsWithTmdbRetry(
   const rejectBacklog: RawRec[] = [];
 
   const seenSuggestions = new Set<string>();
-  const acceptedCatalogIds = new Set<string>();
   const seenFinalKeys = new Set<string>();
 
   let replacementPassesUsed = 0;
@@ -235,15 +194,16 @@ export async function runLiveRecommendationsWithTmdbRetry(
     if (seenSuggestions.has(suggestionKey)) return "skipped";
     seenSuggestions.add(suggestionKey);
 
-    const enriched = await enrichSuggestionRaw(raw, catalog);
+    const enriched = await enrichSuggestionRaw(raw);
     if (!enriched) return "unresolved";
 
-    const fk = enriched.movieId ? `catalog:${enriched.movieId}` : enriched.tmdbId != null ? `tmdb:${enriched.tmdbId}` : `free:${normalizeTitleForMatch(enriched.title)}|${enriched.year ?? ""}`;
+    const fk =
+      enriched.tmdbId != null
+        ? `tmdb:${enriched.tmdbId}`
+        : `free:${normalizeTitleForMatch(enriched.title)}|${enriched.year ?? ""}`;
 
     if (seenFinalKeys.has(fk)) return "skipped";
     seenFinalKeys.add(fk);
-
-    if (enriched.movieId) acceptedCatalogIds.add(enriched.movieId);
 
     settled.push(enriched);
 
@@ -314,18 +274,79 @@ export async function runLiveRecommendationsWithTmdbRetry(
     pending.unshift(...replenished);
   }
 
-  await appendCatalogBackup(catalog, settled, acceptedCatalogIds);
-
   /** Hard trim for API contract */
   const recommendations = settled.slice(0, TARGET_COUNT);
 
   const disclaimerParts = [(rootDisclaimer ?? "").trim(), salvageMeta.trim()].filter(Boolean);
-  disclaimerParts.push(
-    "Poster art joins via catalog import or TMDB when confidence clears (catalog rows fill leftovers).",
-  );
+  disclaimerParts.push("Poster art comes from TMDB when confidence clears.");
 
   return {
     recommendations,
     disclaimer: disclaimerParts.join(" ").trim() || undefined,
+  };
+}
+
+/** Enrich NL search matches with TMDB poster art and ids for card UI. */
+export async function hydrateNlSearchMatches(
+  matches: Array<{ title: string; year?: number; movieId?: string; reason: string }>,
+): Promise<
+  Array<{
+    title: string;
+    year?: number;
+    reason: string;
+    tmdbId?: number | null;
+    posterUrl?: string | null;
+    voteAverage?: number | null;
+  }>
+> {
+  const out: Array<{
+    title: string;
+    year?: number;
+    reason: string;
+    tmdbId?: number | null;
+    posterUrl?: string | null;
+    voteAverage?: number | null;
+  }> = [];
+
+  for (const match of matches) {
+    const enriched = await enrichNlSearchMatch(match);
+    if (enriched.tmdbId != null) out.push(enriched);
+  }
+
+  return out;
+}
+
+async function enrichNlSearchMatch(match: {
+  title: string;
+  year?: number;
+  movieId?: string;
+  reason: string;
+}): Promise<{
+  title: string;
+  year?: number;
+  reason: string;
+  tmdbId?: number | null;
+  posterUrl?: string | null;
+  voteAverage?: number | null;
+}> {
+  const tmdb = await resolveTitleToTmdbBest(match.title, match.year);
+  if (tmdb) {
+    return {
+      title: tmdb.title,
+      year: tmdb.releaseYear ?? match.year,
+      reason: match.reason,
+      posterUrl: tmdb.posterUrl,
+      tmdbId: tmdb.tmdbId,
+      voteAverage: tmdb.voteAverage,
+    };
+  }
+
+  return {
+    title: match.title,
+    year: match.year,
+    reason: match.reason,
+    posterUrl: null,
+    tmdbId: null,
+    voteAverage: null,
   };
 }

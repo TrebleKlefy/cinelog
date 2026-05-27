@@ -20,6 +20,7 @@ export function MainLayout({ auth, onLogout }: { auth: AuthState; onLogout: () =
     { to: "/search", label: "Search", end: true },
     { to: "/catalog", label: "Catalog", end: true },
     { to: "/collection", label: "Collection", end: true, shareBadge: true },
+    { to: "/activity", label: "Activity", end: true },
   ];
 
   return (

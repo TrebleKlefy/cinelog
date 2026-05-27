@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { writeAuditLog } from "../services/auditLog.js";
-import { userCanAccessMovie } from "../services/movieCatalogScope.js";
+import { userCanAccessMovie, collectAccessibleTmdbIds } from "../services/movieCatalogScope.js";
 
 export const collectionsRouter = Router();
 
@@ -247,6 +247,15 @@ meRouter.patch("/collection", async (req, res, next) => {
       title: coll.title,
       isPublic: coll.isPublic,
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+meRouter.get("/catalog/tmdb-ids", async (req, res, next) => {
+  try {
+    const tmdbIds = await collectAccessibleTmdbIds(req.user!.id);
+    res.json({ tmdbIds });
   } catch (e) {
     next(e);
   }

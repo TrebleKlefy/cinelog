@@ -3,7 +3,9 @@ import {
   formatRuntimeMinutes,
   getCatalogBadgeScore,
   getImdbScore,
+  getRottenTomatoesPercent,
   imdbBadgeTier,
+  rtBadgeTier,
   type ExternalRatingDTO,
 } from "./movieDisplay.ts";
 
@@ -37,5 +39,18 @@ describe("movieDisplay helpers", () => {
     expect(imdbBadgeTier(7.2)).toBe("high");
     expect(imdbBadgeTier(6.2)).toBe("mid");
     expect(imdbBadgeTier(5)).toBe("low");
+  });
+
+  it("reads Rotten Tomatoes percent when scale is 0–100", () => {
+    const ratings: ExternalRatingDTO[] = [{ source: "ROTTEN_TOMATOES", value: 85, scale: 100, raw: "85%" }];
+    expect(getRottenTomatoesPercent(ratings)).toBe(85);
+    expect(getRottenTomatoesPercent(undefined)).toBeNull();
+    expect(getRottenTomatoesPercent([{ source: "ROTTEN_TOMATOES", value: 85, scale: 10, raw: null }])).toBeNull();
+  });
+
+  it("classifies Rotten Tomatoes badge tiers", () => {
+    expect(rtBadgeTier(85)).toBe("high");
+    expect(rtBadgeTier(60)).toBe("mid");
+    expect(rtBadgeTier(40)).toBe("low");
   });
 });

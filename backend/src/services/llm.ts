@@ -7,6 +7,11 @@ export type ActiveLlmConfig = {
   modelKey: string;
 };
 
+export type ActiveLlmReadiness = ActiveLlmConfig & {
+  ready: boolean;
+  reason?: string;
+};
+
 export async function getActiveLlmConfig(): Promise<ActiveLlmConfig> {
   const settings = await prisma.appSettings.findUniqueOrThrow({
     where: { id: "default" },
@@ -21,6 +26,46 @@ export async function getActiveLlmConfig(): Promise<ActiveLlmConfig> {
   };
 }
 
+function providerKeyEnvName(providerKey: string): string | null {
+  if (providerKey === "openai") return "OPENAI_API_KEY";
+  if (providerKey === "groq") return "GROQ_API_KEY";
+  return null;
+}
+
+export async function getActiveLlmReadiness(): Promise<ActiveLlmReadiness> {
+  const config = await getActiveLlmConfig();
+  const envName = providerKeyEnvName(config.providerKey);
+  if (!envName) {
+    return {
+      ...config,
+      ready: false,
+      reason: `Provider "${config.providerKey}" has no live chat adapter configured`,
+    };
+  }
+  const key = process.env[envName]?.trim();
+  if (!key) {
+    return {
+      ...config,
+      ready: false,
+      reason: `Missing ${envName}`,
+    };
+  }
+  return { ...config, ready: true };
+}
+
+function canUseMockFallback(): boolean {
+  return process.env.NODE_ENV !== "production" || process.env.ALLOW_LLM_MOCK_FALLBACK === "true";
+}
+
+function buildLiveLlmRequiredError(config: ActiveLlmConfig, reason: string, cause?: unknown): Error & { status: number } {
+  const err = new Error(
+    `Live LLM is required in production. Active provider=${config.providerKey}, model=${config.modelKey}. ${reason}`,
+  ) as Error & { status: number; cause?: unknown };
+  err.status = 503;
+  if (cause) err.cause = cause;
+  return err;
+}
+
 /** Parse JSON from model output; tolerate markdown fences */
 export function parseJsonFromLlmText(text: string): unknown {
   let t = text.trim();
@@ -29,8 +74,17 @@ export function parseJsonFromLlmText(text: string): unknown {
   return JSON.parse(t) as unknown;
 }
 
+export type NlSearchMatch = {
+  title: string;
+  year?: number;
+  reason: string;
+  tmdbId?: number | null;
+  posterUrl?: string | null;
+  voteAverage?: number | null;
+};
+
 export type NlSearchResult = {
-  matches: Array<{ title: string; year?: number; movieId?: string; reason: string }>;
+  matches: NlSearchMatch[];
   notes?: string;
 };
 
@@ -186,48 +240,25 @@ export async function chatCompletionActiveModel(
   throw new Error(`Active LLM provider "${config.providerKey}" has no wired chat-completion adapter`);
 }
 
-function mockNlSearch(userQuery: string, catalog: Array<{ id: string; title: string; year: number }>): NlSearchResult {
-  const q = userQuery.toLowerCase();
-  const matches = catalog
-    .filter((m) => {
-      const hay = `${m.title} ${m.year}`.toLowerCase();
-      return q.split(/\s+/).some((w) => w.length > 2 && hay.includes(w));
-    })
-    .slice(0, 5)
-    .map((m) => ({
-      title: m.title,
-      year: m.year,
-      movieId: m.id,
-      reason: "Keyword match (offline mock — set API keys for live LLM)",
-    }));
-  return { matches, notes: "Using mock LLM (no provider key or provider error)." };
+function mockNlSearch(userQuery: string): NlSearchResult {
+  return { matches: [], notes: "Using mock LLM (no provider key or provider error)." };
 }
 
-function mockRecommendations(
-  catalog: Array<{ id: string; title: string; year: number }>,
-): RecommendationsResult {
+function mockRecommendations(): RecommendationsResult {
   return {
-    recommendations: catalog.slice(0, 7).map((m) => ({
-      title: m.title,
-      year: m.year,
-      movieId: m.id,
-      tmdbId: null,
-      posterUrl: null,
-      why: "Seeded catalog pick (offline mock — set API keys for live LLM)",
-    })),
+    recommendations: [],
     disclaimer: "Mock mode",
   };
 }
 
 export async function runNlSearchWithActiveLlm(params: {
   query: string;
-  catalogContext: string;
-  catalog: Array<{ id: string; title: string; year: number }>;
 }): Promise<{ result: NlSearchResult; config: ActiveLlmConfig; usedLiveLlm: boolean }> {
   const config = await getActiveLlmConfig();
   const system = `You are a movie assistant. Return ONLY valid JSON matching this shape:
-{"matches":[{"title":"string","year":number optional,"movieId":"uuid optional","reason":"string"}],"notes":"string optional"}
-Use the catalog snippet to ground movieId when possible:\n${params.catalogContext}`;
+{"matches":[{"title":"string","year":number optional,"reason":"string"}],"notes":"string optional"}
+Suggest well-known films from general cinema knowledge that match the user's natural language query.
+Use canonical TMDB-friendly title spelling. Do not include internal database ids.`;
   const userMsg = `User query: ${params.query}`;
 
   try {
@@ -241,15 +272,21 @@ Use the catalog snippet to ground movieId when possible:\n${params.catalogContex
       const parsed = parseJsonFromLlmText(text) as NlSearchResult;
       return { result: parsed, config, usedLiveLlm: true };
     }
-    // Anthropic / Together: extend similarly; fall back to mock for now
+    if (!canUseMockFallback()) {
+      throw buildLiveLlmRequiredError(config, "Selected provider is not wired for live chat completions.");
+    }
+    // Anthropic / Together: extend similarly; fall back to mock outside production.
     return {
-      result: mockNlSearch(params.query, params.catalog),
+      result: mockNlSearch(params.query),
       config,
       usedLiveLlm: false,
     };
-  } catch {
+  } catch (cause) {
+    if (!canUseMockFallback()) {
+      throw buildLiveLlmRequiredError(config, "Provider call failed.", cause);
+    }
     return {
-      result: mockNlSearch(params.query, params.catalog),
+      result: mockNlSearch(params.query),
       config,
       usedLiveLlm: false,
     };
@@ -258,7 +295,6 @@ Use the catalog snippet to ground movieId when possible:\n${params.catalogContex
 
 export async function runRecommendationsWithActiveLlm(params: {
   historyContext: string;
-  catalog: Array<{ id: string; title: string; year: number }>;
 }): Promise<{ result: RecommendationsResult; config: ActiveLlmConfig; usedLiveLlm: boolean }> {
   const config = await getActiveLlmConfig();
 
@@ -268,14 +304,20 @@ export async function runRecommendationsWithActiveLlm(params: {
       const merged = await runLiveRecommendationsWithTmdbRetry(params, config);
       return { result: merged, config, usedLiveLlm: true };
     }
+    if (!canUseMockFallback()) {
+      throw buildLiveLlmRequiredError(config, "Selected provider is not wired for live recommendation calls.");
+    }
     return {
-      result: mockRecommendations(params.catalog),
+      result: mockRecommendations(),
       config,
       usedLiveLlm: false,
     };
-  } catch {
+  } catch (cause) {
+    if (!canUseMockFallback()) {
+      throw buildLiveLlmRequiredError(config, "Recommendation provider call failed.", cause);
+    }
     return {
-      result: mockRecommendations(params.catalog),
+      result: mockRecommendations(),
       config,
       usedLiveLlm: false,
     };

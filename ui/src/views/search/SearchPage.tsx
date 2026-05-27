@@ -1,34 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { CatalogMovieCard } from "../../components/CatalogMovieCard";
 import { MovieDetailModal } from "../../components/MovieDetailModal";
 import { RecommendationShelf } from "../../components/RecommendationShelf";
 import { InlineState } from "../../components/InlineState";
+import { useTmdbCatalogImport } from "../../hooks/useTmdbCatalogImport";
 import { api } from "../../lib/api";
 import type { ExternalRatingDTO } from "../../lib/movieDisplay";
 import type { AuthState } from "../../types/auth";
 
 const MOVIES_PAGE_SIZE = 28;
-
-type CatalogItem = {
-  id: string;
-  imdbId: string | null;
-  tmdbId: number | null;
-  title: string;
-  releaseYear: number;
-  runtimeMinutes: number | null;
-  posterUrl: string | null;
-  externalRatings: ExternalRatingDTO[];
-};
-
-type CatalogPagedResponse = {
-  items: CatalogItem[];
-  total: number;
-  page: number;
-  pageSize: number;
-  pages: number;
-};
 
 type TmdbShelfResponse = {
   total: number;
@@ -41,7 +22,26 @@ type TmdbShelfResponse = {
     releaseYear: number | null;
     posterUrl: string | null;
     voteAverage: number | null;
+    inCatalog?: boolean;
   }>;
+};
+
+type NlSearchMatch = {
+  title: string;
+  year?: number;
+  reason: string;
+  tmdbId?: number | null;
+  posterUrl?: string | null;
+  voteAverage?: number | null;
+};
+
+type NlSearchResponse = {
+  matches: NlSearchMatch[];
+  notes?: string;
+};
+
+type GenreListResponse = {
+  items: string[];
 };
 
 function tmdbRatingsPreview(voteAverage: number | null): ExternalRatingDTO[] {
@@ -75,142 +75,122 @@ function BrowsePaginationControlled({ page, pages, busy, label, onPage }: PagerC
   );
 }
 
-type QuickMovieView =
-  | { kind: "catalog"; id: string }
-  | { kind: "tmdb"; tmdbId: number };
+type QuickMovieView = { tmdbId: number };
 
 export function SearchPage({ auth }: { auth: AuthState }) {
   const token = auth?.token;
   const userId = auth?.user?.id;
-  const qc = useQueryClient();
-  const [q, setQ] = useState("");
+  const [cast, setCast] = useState("");
+  const [director, setDirector] = useState("");
+  const [genre, setGenre] = useState("");
+  const [nlQuery, setNlQuery] = useState("");
   const [extQ, setExtQ] = useState("");
-  const [catalogPage, setCatalogPage] = useState(1);
   const [discoverPage, setDiscoverPage] = useState(1);
   const [quickView, setQuickView] = useState<QuickMovieView | null>(null);
 
-  const catalogTyping = q.trim().length > 1;
-  const discoverTyping = extQ.trim().length > 1;
+  const castFilter = cast.trim();
+  const directorFilter = director.trim();
+  const genreFilter = genre.trim();
+  const titleQuery = extQ.trim();
 
-  useEffect(() => {
-    setCatalogPage(1);
-  }, [q]);
+  const resetDiscoverPage = () => setDiscoverPage(1);
 
-  useEffect(() => {
-    setDiscoverPage(1);
-  }, [extQ]);
+  const onDiscoverChange = (value: string) => {
+    setExtQ(value);
+    resetDiscoverPage();
+  };
+  const onCastChange = (value: string) => {
+    setCast(value);
+    resetDiscoverPage();
+  };
+  const onDirectorChange = (value: string) => {
+    setDirector(value);
+    resetDiscoverPage();
+  };
+  const onGenreChange = (value: string) => {
+    setGenre(value);
+    resetDiscoverPage();
+  };
 
-  const catalogBrowse = useQuery({
-    queryKey: ["movies-catalog-home", userId, catalogPage],
-    queryFn: () =>
-      api<CatalogPagedResponse>(
-        `/api/movies?page=${catalogPage}&pageSize=${MOVIES_PAGE_SIZE}`,
-        undefined,
-        token,
-      ),
-    enabled: !catalogTyping && Boolean(token && userId),
-    staleTime: 60_000,
-  });
-
-  const catalogFilter = useQuery({
-    queryKey: ["search", userId, q, catalogPage],
-    queryFn: () =>
-      api<CatalogPagedResponse>(
-        `/api/movies?q=${encodeURIComponent(q)}&page=${catalogPage}&pageSize=${MOVIES_PAGE_SIZE}`,
-        undefined,
-        token,
-      ),
-    enabled: catalogTyping && Boolean(token && userId),
-  });
-
-  const extTrending = useQuery({
-    queryKey: ["tmdb-trending", discoverPage],
-    queryFn: () =>
-      api<TmdbShelfResponse>(`/api/movies/external/tmdb/trending?window=week&page=${discoverPage}&pageSize=${MOVIES_PAGE_SIZE}`),
-    enabled: !discoverTyping,
-    staleTime: 5 * 60_000,
-  });
-
-  const extSearch = useQuery({
-    queryKey: ["tmdb-search", extQ, discoverPage],
-    queryFn: () =>
-      api<TmdbShelfResponse>(
-        `/api/movies/external/tmdb/search?q=${encodeURIComponent(extQ)}&page=${discoverPage}&pageSize=${MOVIES_PAGE_SIZE}`,
-      ),
-    enabled: discoverTyping,
-  });
-
-  const importMut = useMutation({
-    mutationFn: (tmdbId: number) =>
-      api<{ created: boolean; movie: { id: string; title: string } }>(
-        "/api/movies/import/tmdb",
-        { method: "POST", body: JSON.stringify({ tmdbId }) },
-        token,
-      ),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["recommendations"] });
-      qc.invalidateQueries({ queryKey: ["search"] });
-      qc.invalidateQueries({ queryKey: ["movies-all"] });
-      qc.invalidateQueries({ queryKey: ["movies-catalog-home"] });
+  const discoverBrowse = useQuery({
+    queryKey: ["tmdb-browse", titleQuery, castFilter, directorFilter, genreFilter, discoverPage],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        page: String(discoverPage),
+        pageSize: String(MOVIES_PAGE_SIZE),
+      });
+      if (titleQuery.length >= 2) params.set("q", titleQuery);
+      if (castFilter) params.set("cast", castFilter);
+      if (directorFilter) params.set("director", directorFilter);
+      if (genreFilter) params.set("genre", genreFilter);
+      return api<TmdbShelfResponse>(`/api/movies/external/tmdb/browse?${params.toString()}`, undefined, token);
     },
+    staleTime: titleQuery || castFilter || directorFilter || genreFilter ? 0 : 5 * 60_000,
   });
 
-  const catalogSource = catalogTyping ? catalogFilter : catalogBrowse;
-  const catalogPaged = catalogSource.data;
-  const catalogMovies = catalogPaged?.items ?? [];
-  const catalogLoading = catalogSource.isPending;
-  const catalogError = catalogSource.error;
+  const genreOptions = useQuery({
+    queryKey: ["tmdb-genres"],
+    queryFn: () => api<GenreListResponse>("/api/movies/external/tmdb/genres"),
+    staleTime: 24 * 60 * 60_000,
+  });
 
-  const discoverSource = discoverTyping ? extSearch : extTrending;
-  const discoverPaged = discoverSource.data;
+  const { importTmdb, importLabel, isImportDisabled, importError } = useTmdbCatalogImport(token, userId);
+
+  const nlSearchMut = useMutation({
+    mutationFn: (query: string) =>
+      api<NlSearchResponse>(
+        "/api/ai/nl-search",
+        {
+          method: "POST",
+          body: JSON.stringify({ query }),
+        },
+        token,
+      ),
+  });
+
+  const discoverPaged = discoverBrowse.data;
   const discoverItems = discoverPaged?.items ?? [];
-  const discoverLoading = discoverSource.isPending;
-  const discoverError = discoverSource.error;
+  const discoverLoading = discoverBrowse.isPending;
+  const discoverError = discoverBrowse.error;
 
-  const catalogPageCount = useMemo(
-    () => catalogPaged?.pages ?? Math.max(1, Math.ceil((catalogPaged?.total ?? 0) / (catalogPaged?.pageSize ?? MOVIES_PAGE_SIZE))),
-    [catalogPaged],
-  );
   const discoverPageCount = useMemo(() => discoverPaged?.pages ?? 1, [discoverPaged?.pages]);
 
-  useEffect(() => {
-    setCatalogPage((p) => (p > catalogPageCount ? catalogPageCount : p));
-  }, [catalogPageCount]);
-
-  useEffect(() => {
-    setDiscoverPage((p) => (p > discoverPageCount ? discoverPageCount : p));
-  }, [discoverPageCount]);
-
-  const catalogHasRows = useMemo(() => catalogMovies.length > 0, [catalogMovies.length]);
   const discoverHasRows = useMemo(() => discoverItems.length > 0, [discoverItems.length]);
 
-  const discoverSubtitle = discoverTyping ? "TMDB search" : "Trending this week";
+  const discoverHasFilters = Boolean(titleQuery.length >= 2 || castFilter || directorFilter || genreFilter);
 
-  const discoverCards = useMemo(() => {
-    return discoverItems.map((item) => {
-      const subtitleYear = item.releaseYear != null ? ` (${item.releaseYear})` : "";
-      return (
-        <CatalogMovieCard
-          key={`${discoverTyping ? "s" : "t"}-${item.tmdbId}`}
-          title={`${item.title}${subtitleYear}`}
-          posterUrl={item.posterUrl}
-          runtimeMinutes={null}
-          onPosterClick={() => setQuickView({ kind: "tmdb", tmdbId: item.tmdbId })}
-          externalRatings={tmdbRatingsPreview(item.voteAverage)}
-          footer={
-            <button
-              type="button"
-              className="button button--gold button--sm catalog-card__footer-anchor"
-              disabled={importMut.isPending || !token}
-              onClick={() => importMut.mutate(item.tmdbId)}
-            >
-              {!token ? "Sign in to import" : importMut.isPending ? "…" : "Add to catalog"}
-            </button>
-          }
-        />
-      );
-    });
-  }, [discoverItems, discoverTyping, importMut.isPending, token]);
+  const discoverSubtitle = useMemo(() => {
+    if (castFilter || directorFilter || genreFilter) {
+      if (titleQuery.length >= 2) return "TMDB discover (filtered + title)";
+      return "TMDB discover";
+    }
+    if (titleQuery.length >= 2) return "TMDB search";
+    return "Trending this week";
+  }, [castFilter, directorFilter, genreFilter, titleQuery]);
+
+  const discoverCards = discoverItems.map((item) => {
+    const subtitleYear = item.releaseYear != null ? ` (${item.releaseYear})` : "";
+    return (
+      <CatalogMovieCard
+        key={`discover-${item.tmdbId}`}
+        title={`${item.title}${subtitleYear}`}
+        posterUrl={item.posterUrl}
+        runtimeMinutes={null}
+        onPosterClick={() => setQuickView({ tmdbId: item.tmdbId })}
+        externalRatings={tmdbRatingsPreview(item.voteAverage)}
+        footer={
+          <button
+            type="button"
+            className="button button--gold button--sm catalog-card__footer-anchor"
+            disabled={isImportDisabled(item.tmdbId)}
+            onClick={() => importTmdb(item.tmdbId)}
+          >
+            {importLabel(item.tmdbId)}
+          </button>
+        }
+      />
+    );
+  });
 
   return (
     <div className="browse-page">
@@ -218,64 +198,19 @@ export function SearchPage({ auth }: { auth: AuthState }) {
         auth={auth}
         open={quickView !== null}
         onClose={() => setQuickView(null)}
-        catalogMovieId={quickView?.kind === "catalog" ? quickView.id : null}
-        tmdbPreviewId={quickView?.kind === "tmdb" ? quickView.tmdbId : null}
+        catalogMovieId={null}
+        tmdbPreviewId={quickView?.tmdbId ?? null}
       />
       <header className="browse-masthead">
         <h1 className="browse-masthead__title">Movies</h1>
         <p className="browse-masthead__lede">
-          Browse titles in your catalog or explore{" "}
+          Explore{" "}
           <a href="https://developer.themoviedb.org/docs/getting-started">The Movie Database</a>: trending fills the shelf by default; type two or more
-          characters to search TMDB and your library. Each grid shows up to {MOVIES_PAGE_SIZE} titles per page.
+          characters to search TMDB. Each grid shows up to {MOVIES_PAGE_SIZE} titles per page.
         </p>
       </header>
 
       <section className="browse-shelf browse-shelf--connect">
-        <div className="browse-shelf__inner">
-          <h2 className="shelf-heading">Your catalog</h2>
-          <label className="field field--on-dark">
-            <span>Filter by title</span>
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder={`Shows ${MOVIES_PAGE_SIZE} movies per page · type to filter (2+ characters)`}
-            />
-          </label>
-          <InlineState
-            loading={catalogLoading}
-            error={catalogError ? (catalogError as Error).message : undefined}
-            hasData={catalogHasRows}
-            emptyText={catalogTyping ? "No movies matched your filter." : "Your catalog is empty — browse Discover below and import a title."}
-          />
-          <div className="catalog-grid">
-            {catalogMovies.map((m) => (
-              <CatalogMovieCard
-                key={m.id}
-                detailHref={`/movies/${m.id}`}
-                onPosterClick={() => setQuickView({ kind: "catalog", id: m.id })}
-                title={m.title}
-                posterUrl={m.posterUrl}
-                runtimeMinutes={m.runtimeMinutes}
-                externalRatings={m.externalRatings}
-              />
-            ))}
-          </div>
-          <BrowsePaginationControlled
-            page={catalogPage}
-            pages={catalogPageCount}
-            busy={catalogLoading}
-            label="Catalog pagination"
-            onPage={setCatalogPage}
-          />
-          <div className="browse-catalog-see-all">
-            <Link to="/catalog" className="button button--secondary button--sm">
-              See all catalog
-            </Link>
-          </div>
-        </div>
-      </section>
-
-      <section className="browse-shelf browse-shelf--standalone">
         <div className="browse-shelf__inner">
           <h2 className="shelf-heading">Discover & import</h2>
           <p className="browse-shelf__hint">
@@ -286,34 +221,118 @@ export function SearchPage({ auth }: { auth: AuthState }) {
             <span>Search TMDB</span>
             <input
               value={extQ}
-              onChange={(e) => setExtQ(e.target.value)}
+              onChange={(e) => onDiscoverChange(e.target.value)}
               placeholder={`Trending loads ${MOVIES_PAGE_SIZE} titles per page · search with 2+ characters`}
             />
           </label>
+          <div className="row">
+            <label className="field field--on-dark">
+              <span>Cast</span>
+              <input value={cast} onChange={(e) => onCastChange(e.target.value)} placeholder="Actor name" />
+            </label>
+            <label className="field field--on-dark">
+              <span>Director</span>
+              <input value={director} onChange={(e) => onDirectorChange(e.target.value)} placeholder="Director name" />
+            </label>
+          </div>
+          <label className="field field--on-dark">
+            <span>Genre</span>
+            <select value={genre} onChange={(e) => onGenreChange(e.target.value)}>
+              <option value="">All genres</option>
+              {(genreOptions.data?.items ?? []).map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field field--on-dark">
+            <span>Natural language search</span>
+            <div className="row row--shelf">
+              <input
+                value={nlQuery}
+                onChange={(e) => setNlQuery(e.target.value)}
+                placeholder="Example: a 90s sci-fi with time travel"
+              />
+              <button
+                type="button"
+                className="button button--secondary button--sm"
+                disabled={!token || nlSearchMut.isPending || nlQuery.trim().length < 2}
+                onClick={() => nlSearchMut.mutate(nlQuery.trim())}
+              >
+                {nlSearchMut.isPending ? "Searching…" : "Run AI search"}
+              </button>
+            </div>
+          </label>
+          {nlSearchMut.isError ? <p className="status status--error">{(nlSearchMut.error as Error).message}</p> : null}
+          {nlSearchMut.data ? (
+            <div className="search-panel">
+              <p className="browse-shelf__hint">
+                <strong>AI matches.</strong> {nlSearchMut.data.notes ?? "Results ranked by semantic fit."}
+              </p>
+              {nlSearchMut.data.matches.length === 0 ? (
+                <p className="browse-shelf__hint">No natural-language matches for that query.</p>
+              ) : (
+                <div className="catalog-grid dashboard-rec-grid">
+                  {nlSearchMut.data.matches.map((m, i) => {
+                    if (m.tmdbId == null) return null;
+                    const cardTitle = m.year != null ? `${m.title} (${m.year})` : m.title;
+
+                    return (
+                      <CatalogMovieCard
+                        key={`nl-tmdb:${m.tmdbId}-${i}`}
+                        title={cardTitle}
+                        posterUrl={m.posterUrl ?? null}
+                        onPosterClick={() => setQuickView({ tmdbId: m.tmdbId! })}
+                        externalRatings={tmdbRatingsPreview(m.voteAverage ?? null)}
+                        footer={
+                          <div className="dashboard-rec-card-footer">
+                            <p className="dashboard-rec-footer__why">{m.reason}</p>
+                            <div className="dashboard-rec-footer-slot p-2">
+                              <button
+                                type="button"
+                                className="button button--gold button--sm dashboard-rec-import-btn pt-2"
+                                disabled={isImportDisabled(m.tmdbId!)}
+                                onClick={() => importTmdb(m.tmdbId!)}
+                              >
+                                {importLabel(m.tmdbId!)}
+                              </button>
+                              {importError(m.tmdbId!) ? (
+                                <p className="status status--error dashboard-rec-import-status">{importError(m.tmdbId!)}</p>
+                              ) : null}
+                            </div>
+                          </div>
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+
           <InlineState
             loading={discoverLoading}
             error={discoverError ? (discoverError as Error).message : undefined}
             hasData={discoverHasRows}
-            emptyText={discoverTyping ? "No TMDB matches for that search." : "Could not load trending titles."}
+            emptyText={
+              discoverHasFilters ? "No TMDB matches for those filters." : "Could not load trending titles."
+            }
           />
-          {importMut.error && <p className="status status--error">{(importMut.error as Error).message}</p>}
-          {importMut.isSuccess && (
-            <p className="status status--info">
-              {importMut.data.created ? "Imported" : "Updated"}: {importMut.data.movie.title}
-            </p>
-          )}
+
           <div className="catalog-grid">{discoverCards}</div>
           <BrowsePaginationControlled
             page={discoverPage}
             pages={discoverPageCount}
             busy={discoverLoading}
             label="Discover pagination"
-            onPage={setDiscoverPage}
+            onPage={(next) => setDiscoverPage(Math.max(1, Math.min(discoverPageCount, next)))}
           />
 
           <div className="browse-discover-after">
             <p className="browse-shelf__hint browse-shelf__hint--divider">
-              <strong>For you.</strong> Personalized picks based on your history and catalog — import any TMDB-backed card with one tap.
+              <strong>For you.</strong> Personalized picks based on your history — import any TMDB-backed card with one tap.
             </p>
             <RecommendationShelf auth={auth} headingClassName="shelf-heading" heading="Recommendations" />
           </div>

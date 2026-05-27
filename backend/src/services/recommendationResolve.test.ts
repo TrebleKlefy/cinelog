@@ -1,19 +1,8 @@
-import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const movieFindUnique = vi.hoisted(() => vi.fn());
-
-vi.mock("../lib/prisma.js", () => ({
-  prisma: {
-    movie: {
-      findUnique: movieFindUnique,
-    },
-  },
-}));
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as llm from "./llm.js";
 import * as tmdb from "./tmdb.js";
-import { resolveTitleToTmdbBest, runLiveRecommendationsWithTmdbRetry } from "./recommendationResolve.js";
+import { resolveTitleToTmdbBest, hydrateNlSearchMatches, runLiveRecommendationsWithTmdbRetry } from "./recommendationResolve.js";
 
 describe("resolveTitleToTmdbBest", () => {
   afterEach(() => {
@@ -209,20 +198,6 @@ describe("resolveTitleToTmdbBest", () => {
 });
 
 describe("runLiveRecommendationsWithTmdbRetry", () => {
-  const catalog = Array.from({ length: 14 }, (_, i) => ({
-    id: randomUUID(),
-    title: `Catalog Title ${i}`,
-    year: 2000 + i,
-  }));
-
-  beforeEach(() => {
-    movieFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
-      const row = catalog.find((c) => c.id === where.id);
-      if (!row) return null;
-      return { title: row.title, releaseYear: row.year, posterUrl: `/p-${row.id.slice(0, 4)}.jpg` };
-    });
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -232,39 +207,75 @@ describe("runLiveRecommendationsWithTmdbRetry", () => {
   it("throws when the first model payload is empty", async () => {
     vi.spyOn(llm, "chatCompletionActiveModel").mockResolvedValueOnce(JSON.stringify({ recommendations: [] }));
 
-    await expect(runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config)).rejects.toThrow(
+    await expect(runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config)).rejects.toThrow(
       "zero usable rows",
     );
   });
 
-  it("hydrates recommendations from catalog matches", async () => {
+  it("hydrates recommendations from TMDB matches", async () => {
+    const seedTitles = Array.from({ length: 11 }, (_, i) => `Catalog Title ${i}`);
+    vi.spyOn(tmdb, "tmdbSearchMovies").mockImplementation(async (q: string) => {
+      const hit = seedTitles.find((title) => q.includes(title));
+      if (!hit) return { items: [], total: 0, page: 1, pages: 1 };
+      const idx = seedTitles.indexOf(hit);
+      return {
+        items: [
+          {
+            tmdbId: 1000 + idx,
+            title: hit,
+            releaseYear: 2000 + idx,
+            posterUrl: `/p-${idx}.jpg`,
+            voteAverage: 8,
+          },
+        ],
+        total: 1,
+        page: 1,
+        pages: 1,
+      };
+    });
+
     const initial = {
-      recommendations: catalog.slice(0, 11).map((c) => ({
-        title: c.title,
-        year: c.year,
+      recommendations: seedTitles.map((title, i) => ({
+        title,
+        year: 2000 + i,
         why: "Because tests",
       })),
       disclaimer: "unit",
     };
     vi.spyOn(llm, "chatCompletionActiveModel").mockResolvedValueOnce(JSON.stringify(initial));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config);
     expect(out.recommendations).toHaveLength(7);
     expect(out.recommendations.every((r) => r.why === "Because tests")).toBe(true);
+    expect(out.recommendations.every((r) => r.tmdbId != null)).toBe(true);
     expect(out.disclaimer).toContain("unit");
     expect(out.disclaimer).not.toMatch(/TMDB-aligned salvage wave/);
   });
 
   it("skips duplicate brainstorm rows keyed by canonical title/year", async () => {
-    const seed = catalog[0]!;
-    const rows = catalog.slice(0, 11).map((c, idx) =>
-      idx === 1 ? { title: seed.title, year: seed.year, why: "dup" } : { title: c.title, year: c.year, why: "uniq" },
+    vi.spyOn(tmdb, "tmdbSearchMovies").mockResolvedValue({
+      items: [
+        {
+          tmdbId: 42,
+          title: "Shared Title",
+          releaseYear: 2010,
+          posterUrl: "/p.jpg",
+          voteAverage: 8,
+        },
+      ],
+      total: 1,
+      page: 1,
+      pages: 1,
+    });
+
+    const rows = Array.from({ length: 11 }, (_, idx) =>
+      idx === 1 ? { title: "Shared Title", year: 2010, why: "dup" } : { title: `Unique ${idx}`, year: 2010 + idx, why: "uniq" },
     );
     vi.spyOn(llm, "chatCompletionActiveModel").mockResolvedValueOnce(JSON.stringify({ recommendations: rows }));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config);
-    expect(out.recommendations).toHaveLength(7);
-    expect(out.recommendations.filter((r) => r.title === seed.title)).toHaveLength(1);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config);
+    expect(out.recommendations.length).toBeGreaterThan(0);
+    expect(out.recommendations.filter((r) => r.title === "Shared Title")).toHaveLength(1);
   });
 
   it("enriches unseen titles via TMDB when catalog verification fails", async () => {
@@ -296,7 +307,7 @@ describe("runLiveRecommendationsWithTmdbRetry", () => {
     };
     vi.spyOn(llm, "chatCompletionActiveModel").mockResolvedValueOnce(JSON.stringify(initial));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "space opera", catalog }, config);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "space opera" }, config);
     expect(out.recommendations).toHaveLength(7);
     expect(out.recommendations.every((r) => r.tmdbId != null)).toBe(true);
     expect(out.recommendations.every((r) => r.movieId == null)).toBe(true);
@@ -341,7 +352,7 @@ describe("runLiveRecommendationsWithTmdbRetry", () => {
       .mockResolvedValueOnce(JSON.stringify({ recommendations: broken }))
       .mockResolvedValueOnce(JSON.stringify(salvagePayload));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "big fan of sci-fi", catalog }, config);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "big fan of sci-fi" }, config);
     expect(out.recommendations.length).toBeGreaterThan(0);
     expect(out.disclaimer).toMatch(/TMDB-aligned salvage wave/);
   });
@@ -359,7 +370,7 @@ describe("runLiveRecommendationsWithTmdbRetry", () => {
       .mockResolvedValueOnce(JSON.stringify({ recommendations: broken }))
       .mockResolvedValueOnce("not-json at all");
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config);
     expect(out.disclaimer).toMatch(/Salvage pass .* failed during JSON ingest/);
   });
 
@@ -376,24 +387,18 @@ describe("runLiveRecommendationsWithTmdbRetry", () => {
       .mockResolvedValueOnce(JSON.stringify({ recommendations: broken }))
       .mockResolvedValueOnce(JSON.stringify({ recommendations: [] }));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config);
     expect(out.recommendations.length).toBeLessThanOrEqual(7);
   });
 
-  it("fills leftover slots from the catalog after partial TMDB success", async () => {
+  it("returns no rows when TMDB cannot verify any suggestion", async () => {
     vi.spyOn(tmdb, "tmdbSearchMovies").mockResolvedValue({ items: [], total: 0, page: 1, pages: 1 });
 
-    const onlyOne = [{ title: catalog[0]!.title, year: catalog[0]!.year, why: "only sure thing" }];
+    const onlyOne = [{ title: "Unknown Film", year: 1999, why: "only suggestion" }];
     vi.spyOn(llm, "chatCompletionActiveModel").mockResolvedValueOnce(JSON.stringify({ recommendations: onlyOne }));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config);
-    expect(out.recommendations).toHaveLength(7);
-
-    /** First hydrated row preserves the LLM rationale, catalog filler uses the deterministic backup phrase */
-    const backupRows = out.recommendations.slice(1).filter((r) => r.movieId !== catalog[0]!.id);
-    expect(backupRows.length).toBeGreaterThan(0);
-    expect(backupRows[0]?.why).toContain("catalog");
-    expect(out.recommendations.every((r) => r.movieId)).toBe(true);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config);
+    expect(out.recommendations).toHaveLength(0);
   });
 
   it("stops issuing salvage completions after exhausting the capped retry budget", async () => {
@@ -421,7 +426,53 @@ describe("runLiveRecommendationsWithTmdbRetry", () => {
       .mockResolvedValueOnce(wave("B"))
       .mockResolvedValueOnce(wave("C"));
 
-    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx", catalog }, config);
+    const out = await runLiveRecommendationsWithTmdbRetry({ historyContext: "ctx" }, config);
     expect(out.disclaimer).toMatch(/Exhausted TMDB-guided AI salvage/);
+  });
+});
+
+describe("hydrateNlSearchMatches", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("enriches matches with TMDB poster art when search resolves", async () => {
+    vi.spyOn(tmdb, "tmdbSearchMovies").mockResolvedValueOnce({
+      items: [
+        {
+          tmdbId: 27205,
+          title: "Inception",
+          releaseYear: 2010,
+          posterUrl: "https://image.tmdb.org/t/p/w500/inception.jpg",
+          voteAverage: 8.8,
+        },
+      ],
+      total: 1,
+      page: 1,
+      pages: 1,
+    });
+
+    const out = await hydrateNlSearchMatches([
+      { title: "Inception", year: 2010, reason: "dream heist vibes" },
+    ]);
+
+    expect(out[0]?.tmdbId).toBe(27205);
+    expect(out[0]?.posterUrl).toContain("inception.jpg");
+    expect(out[0]?.voteAverage).toBe(8.8);
+  });
+
+  it("omits NL matches when TMDB cannot resolve", async () => {
+    vi.spyOn(tmdb, "tmdbSearchMovies").mockResolvedValueOnce({
+      items: [],
+      total: 0,
+      page: 1,
+      pages: 1,
+    });
+
+    const out = await hydrateNlSearchMatches([
+      { title: "Local Title", year: 1999, reason: "no tmdb hit" },
+    ]);
+
+    expect(out).toHaveLength(0);
   });
 });

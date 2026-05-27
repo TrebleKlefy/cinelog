@@ -83,6 +83,8 @@ export function CollectionPage({ auth }: { auth: AuthState }) {
       await qc.invalidateQueries({ queryKey: ["search"] });
       await qc.invalidateQueries({ queryKey: ["movie"] });
       await qc.invalidateQueries({ queryKey: ["movie-detail-modal"] });
+      await qc.invalidateQueries({ queryKey: ["catalog-tmdb-ids"] });
+      await qc.invalidateQueries({ queryKey: ["tmdb-browse"] });
       setCatalogRemoval(null);
     },
   });

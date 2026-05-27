@@ -8,6 +8,7 @@ import { aiRouter } from "./routes/ai.js";
 import { adminRouter } from "./routes/admin.js";
 import { collectionsRouter, meRouter } from "./routes/me.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { getActiveLlmReadiness } from "./services/llm.js";
 
 export function createApp() {
   const app = express();
@@ -29,8 +30,32 @@ export function createApp() {
   app.get("/api/health/db", (_req, res) => {
     res.json({ ok: true, status: "db-healthy" });
   });
-  app.get("/api/health/llm", (_req, res) => {
-    res.json({ ok: true, status: "llm-healthy" });
+  app.get("/api/health/llm", async (_req, res) => {
+    try {
+      const readiness = await getActiveLlmReadiness();
+      if (!readiness.ready) {
+        res.status(503).json({
+          ok: false,
+          status: "llm-not-ready",
+          provider: readiness.providerKey,
+          model: readiness.modelKey,
+          reason: readiness.reason,
+        });
+        return;
+      }
+      res.json({
+        ok: true,
+        status: "llm-healthy",
+        provider: readiness.providerKey,
+        model: readiness.modelKey,
+      });
+    } catch (e) {
+      res.status(503).json({
+        ok: false,
+        status: "llm-health-error",
+        reason: e instanceof Error ? e.message : "Unknown LLM health error",
+      });
+    }
   });
   
   app.use("/api/auth", authRouter);

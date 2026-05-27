@@ -52,6 +52,7 @@ const userAccess = vi.hoisted(() => vi.fn());
 vi.mock("../services/movieCatalogScope.js", () => ({
   userCanAccessMovie: (...args: unknown[]) => userAccess(...args),
   movieVisibilityWhere: vi.fn().mockResolvedValue(null),
+  collectAccessibleTmdbIds: vi.fn().mockResolvedValue([42]),
 }));
 
 vi.mock("../services/auditLog.js", () => ({
@@ -59,6 +60,7 @@ vi.mock("../services/auditLog.js", () => ({
 }));
 
 import { writeAuditLog } from "../services/auditLog.js";
+import { collectAccessibleTmdbIds } from "../services/movieCatalogScope.js";
 
 describe("/api/me", () => {
   let app: Express;
@@ -349,6 +351,13 @@ describe("/api/me", () => {
     const res = await request(app).get("/api/me/audit-logs").set(headers());
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: "Internal server error" });
+  });
+
+  it("returns catalog TMDB ids for the signed-in user", async () => {
+    vi.mocked(collectAccessibleTmdbIds).mockResolvedValueOnce([42, 99]);
+    const res = await request(app).get("/api/me/catalog/tmdb-ids").set(headers());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ tmdbIds: [42, 99] });
   });
 
   it("delegates PATCH metadata failures downstream", async () => {

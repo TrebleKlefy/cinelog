@@ -1158,6 +1158,21 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
+.catalog-badge--rt.catalog-badge--high {
+  background: #e12728;
+  color: #fff;
+}
+
+.catalog-badge--rt.catalog-badge--mid {
+  background: #f5a623;
+  color: #1a0b02;
+}
+
+.catalog-badge--rt.catalog-badge--low {
+  background: #64748b;
+  color: #f8fafc;
+}
+
 .catalog-card__titlebar {
   position: absolute;
   left: 0;

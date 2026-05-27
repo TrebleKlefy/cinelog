@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { MoviePoster } from "./MoviePoster";
-import { formatRuntimeMinutes, getCatalogBadgeScore, imdbBadgeTier, type ExternalRatingDTO } from "../lib/movieDisplay";
+import { formatRuntimeMinutes, getCatalogBadgeScore, getRottenTomatoesPercent, imdbBadgeTier, rtBadgeTier, type ExternalRatingDTO } from "../lib/movieDisplay";
 
 type CatalogMovieCardProps = {
   title: string;
@@ -29,6 +29,8 @@ export function CatalogMovieCard({
 }: CatalogMovieCardProps) {
   const score = getCatalogBadgeScore(externalRatings);
   const tier = score != null ? imdbBadgeTier(score) : null;
+  const rtPercent = getRottenTomatoesPercent(externalRatings);
+  const rtTier = rtPercent != null ? rtBadgeTier(rtPercent) : null;
   const runtime = formatRuntimeMinutes(runtimeMinutes ?? null);
 
   const href = detailHref ?? to ?? undefined;
@@ -47,6 +49,11 @@ export function CatalogMovieCard({
           <div className="catalog-card__badges" aria-label="Metadata">
             {score != null && (
               <span className={`catalog-badge catalog-badge--rating catalog-badge--${tier}`}>{score.toFixed(1)}</span>
+            )}
+            {rtPercent != null && (
+              <span className={`catalog-badge catalog-badge--rt catalog-badge--${rtTier}`} title="Rotten Tomatoes">
+                {Math.round(rtPercent)}%
+              </span>
             )}
             {runtime != null && <span className="catalog-badge catalog-badge--runtime">{runtime}</span>}
           </div>
@@ -67,6 +74,11 @@ export function CatalogMovieCard({
           <div className="catalog-card__badges" aria-label="Metadata">
             {score != null && (
               <span className={`catalog-badge catalog-badge--rating catalog-badge--${tier}`}>{score.toFixed(1)}</span>
+            )}
+            {rtPercent != null && (
+              <span className={`catalog-badge catalog-badge--rt catalog-badge--${rtTier}`} title="Rotten Tomatoes">
+                {Math.round(rtPercent)}%
+              </span>
             )}
             {runtime != null && <span className="catalog-badge catalog-badge--runtime">{runtime}</span>}
           </div>

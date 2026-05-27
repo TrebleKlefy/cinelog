@@ -229,8 +229,141 @@ export async function tmdbSearchForUiPage(
   return tmdbAccumulatePaged(fetchBatch, uiPage, pageSize);
 }
 
+type TmdbGenreListResponse = {
+  genres: Array<{ id: number; name: string }>;
+};
 
-export type TmdbMovieDetailImported = {
+type TmdbPersonSearchRow = {
+  id: number;
+  name?: string;
+  known_for_department?: string;
+};
+
+type TmdbPersonSearchResponse = {
+  results: TmdbPersonSearchRow[];
+};
+
+let tmdbGenreList: Array<{ id: number; name: string }> | null = null;
+
+async function ensureTmdbGenreList(): Promise<void> {
+  if (tmdbGenreList) return;
+  const raw = await tmdbFetchJson<TmdbGenreListResponse>("/genre/movie/list", {
+    language: "en-US",
+  });
+  tmdbGenreList = raw.genres ?? [];
+}
+
+async function tmdbGenreIdByName(name: string): Promise<number | null> {
+  await ensureTmdbGenreList();
+  const match = tmdbGenreList!.find((g) => g.name.trim().toLowerCase() === name.trim().toLowerCase());
+  return match?.id ?? null;
+}
+
+export async function tmdbMovieGenreNames(): Promise<string[]> {
+  await ensureTmdbGenreList();
+  return tmdbGenreList!.map((g) => g.name).sort((a, b) => a.localeCompare(b));
+}
+
+async function tmdbPersonIdByName(name: string, department?: string): Promise<number | null> {
+  const raw = await tmdbFetchJson<TmdbPersonSearchResponse>("/search/person", {
+    query: name.trim(),
+    page: "1",
+    include_adult: "false",
+  });
+  const rows = raw.results ?? [];
+  if (rows.length === 0) return null;
+  if (department) {
+    const deptMatch = rows.find((r) => r.known_for_department === department);
+    if (deptMatch?.id) return deptMatch.id;
+  }
+  return rows[0]?.id ?? null;
+}
+
+async function tmdbDiscoverMovies(
+  page: number,
+  filters: { genreId?: number; castId?: number; crewId?: number },
+): Promise<{ total: number; page: number; pages: number; items: TmdbMovieBrowseItem[] }> {
+  const params: Record<string, string> = {
+    page: String(page),
+    language: "en-US",
+    sort_by: "popularity.desc",
+    include_adult: "false",
+  };
+  if (filters.genreId != null) params.with_genres = String(filters.genreId);
+  if (filters.castId != null) params.with_cast = String(filters.castId);
+  if (filters.crewId != null) params.with_crew = String(filters.crewId);
+
+  const raw = await tmdbFetchJson<TmdbSearchResponse>("/discover/movie", params);
+  return discoverPayloadFrom(raw);
+}
+
+function emptyUiPage(uiPage: number, pageSize: number) {
+  return {
+    total: 0,
+    page: uiPage,
+    pages: 1,
+    pageSize,
+    items: [] as TmdbMovieBrowseItem[],
+  };
+}
+
+/** TMDB browse for Discover UI: trending, title search, and/or cast/director/genre filters. */
+export async function tmdbBrowseForUiPage(opts: {
+  q?: string;
+  cast?: string;
+  director?: string;
+  genre?: string;
+  uiPage: number;
+  pageSize: number;
+}): Promise<{ total: number; page: number; pages: number; pageSize: number; items: TmdbMovieBrowseItem[] }> {
+  const q = opts.q?.trim() ?? "";
+  const cast = opts.cast?.trim() ?? "";
+  const director = opts.director?.trim() ?? "";
+  const genre = opts.genre?.trim() ?? "";
+  const hasSubFilters = Boolean(cast || director || genre);
+  const hasQuery = q.length >= 2;
+
+  if (!hasSubFilters && !hasQuery) {
+    return tmdbTrendingForUiPage("week", opts.uiPage, opts.pageSize);
+  }
+
+  if (!hasSubFilters && hasQuery) {
+    return tmdbSearchForUiPage(q, opts.uiPage, opts.pageSize);
+  }
+
+  const [genreId, castId, crewId] = await Promise.all([
+    genre ? tmdbGenreIdByName(genre) : Promise.resolve(null),
+    cast ? tmdbPersonIdByName(cast, "Acting") : Promise.resolve(null),
+    director ? tmdbPersonIdByName(director, "Directing") : Promise.resolve(null),
+  ]);
+
+  if (genre && genreId == null) return emptyUiPage(opts.uiPage, opts.pageSize);
+  if (cast && castId == null) return emptyUiPage(opts.uiPage, opts.pageSize);
+  if (director && crewId == null) return emptyUiPage(opts.uiPage, opts.pageSize);
+
+  const fetchBatch = async (apiPage: number) => {
+    const r = await tmdbDiscoverMovies(apiPage, {
+      genreId: genreId ?? undefined,
+      castId: castId ?? undefined,
+      crewId: crewId ?? undefined,
+    });
+    let items = r.items;
+    if (hasQuery) {
+      const needle = q.toLowerCase();
+      items = items.filter((it) => it.title.toLowerCase().includes(needle));
+    }
+    return {
+      items,
+      apiTotalResults: hasQuery ? items.length : r.total,
+      apiTotalPages: r.pages,
+    };
+  };
+
+  return tmdbAccumulatePaged(fetchBatch, opts.uiPage, opts.pageSize);
+}
+
+
+export type TmdbMovieQuickImported = {
   tmdbId: number;
   imdbId: string | null;
   title: string;
@@ -239,9 +372,12 @@ export type TmdbMovieDetailImported = {
   synopsis: string | null;
   posterUrl: string | null;
   genreNames: string[];
+  tmdbVoteAverage: number | null;
+};
+
+export type TmdbMovieDetailImported = TmdbMovieQuickImported & {
   directors: string[];
   cast: Array<{ name: string; character: string | null }>;
-  tmdbVoteAverage: number | null;
 };
 
 /** Append fields become top-level siblings on TMDB GET /movie/{id}. */
@@ -285,14 +421,45 @@ function normalizeExternalImdbId(raw: unknown): string | null {
   return /^tt\d+$/.test(normalized) ? normalized : null;
 }
 
+function parseTmdbMovieQuickFields(data: TmdbMovieDetailResponse): TmdbMovieQuickImported {
+  const imdbId = normalizeExternalImdbId(data.external_ids?.imdb_id);
+  const releaseYear = parseReleaseYearFromTmdb(data.release_date ?? null);
+  const genres = data.genres?.map((g) => g.name.trim()).filter(Boolean) ?? [];
+  const synopsis = data.overview?.trim() ? data.overview.trim() : null;
+  const runtimeMinutes =
+    typeof data.runtime === "number" && data.runtime > 0 ? Math.floor(data.runtime) : null;
+  const voteAvg =
+    typeof data.vote_average === "number" && Number.isFinite(data.vote_average) ? data.vote_average : null;
+
+  return {
+    tmdbId: data.id,
+    imdbId,
+    title: data.title?.trim() ? data.title.trim() : "Untitled",
+    releaseYear,
+    runtimeMinutes,
+    synopsis,
+    posterUrl: tmdbPosterUrl(data.poster_path),
+    genreNames: genres,
+    tmdbVoteAverage: voteAvg,
+  };
+}
+
+/** Lightweight TMDB fetch for instant catalog adds (no credits). */
+export async function tmdbFetchMovieQuickPayload(tmdbId: number): Promise<TmdbMovieQuickImported> {
+  const data = await tmdbFetchJson<TmdbMovieDetailResponse>(`/movie/${tmdbId}`, {
+    append_to_response: "external_ids",
+    language: "en-US",
+  });
+  return parseTmdbMovieQuickFields(data);
+}
+
 export async function tmdbFetchMovieImportPayload(tmdbId: number): Promise<TmdbMovieDetailImported> {
   const data = await tmdbFetchJson<TmdbMovieDetailResponse>(`/movie/${tmdbId}`, {
     append_to_response: "credits,external_ids",
     language: "en-US",
   });
 
-  const imdbId = normalizeExternalImdbId(data.external_ids?.imdb_id);
-  const releaseYear = parseReleaseYearFromTmdb(data.release_date ?? null);
+  const quick = parseTmdbMovieQuickFields(data);
 
   const directors =
     data.credits?.crew
@@ -310,26 +477,9 @@ export async function tmdbFetchMovieImportPayload(tmdbId: number): Promise<TmdbM
         character: c.character?.trim() ? c.character.trim() : null,
       })) ?? [];
 
-  const genres = data.genres?.map((g) => g.name.trim()).filter(Boolean) ?? [];
-
-  const synopsis = data.overview?.trim() ? data.overview.trim() : null;
-  const runtimeMinutes =
-    typeof data.runtime === "number" && data.runtime > 0 ? Math.floor(data.runtime) : null;
-
-  const voteAvg =
-    typeof data.vote_average === "number" && Number.isFinite(data.vote_average) ? data.vote_average : null;
-
   return {
-    tmdbId: data.id,
-    imdbId,
-    title: data.title?.trim() ? data.title.trim() : "Untitled",
-    releaseYear,
-    runtimeMinutes,
-    synopsis,
-    posterUrl: tmdbPosterUrl(data.poster_path),
-    genreNames: genres,
+    ...quick,
     directors: uniqueDirectors,
     cast: castMembers,
-    tmdbVoteAverage: voteAvg,
   };
 }

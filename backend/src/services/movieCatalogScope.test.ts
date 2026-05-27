@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   ratingFindMany: vi.fn(),
   hiddenFindMany: vi.fn(),
   hiddenFindUnique: vi.fn(),
+  movieFindMany: vi.fn(),
 }));
 
 vi.mock("../lib/prisma.js", () => ({
@@ -15,11 +16,13 @@ vi.mock("../lib/prisma.js", () => ({
     collectionMovie: { findMany: mocks.collectionFindMany },
     userMovieRating: { findMany: mocks.ratingFindMany },
     userHiddenMovie: { findMany: mocks.hiddenFindMany, findUnique: mocks.hiddenFindUnique },
+    movie: { findMany: mocks.movieFindMany },
   },
 }));
 
 import {
   collectAccessibleMovieIds,
+  collectAccessibleTmdbIds,
   movieVisibilityWhere,
   userCanAccessMovie,
 } from "./movieCatalogScope.js";
@@ -56,6 +59,28 @@ describe("collectAccessibleMovieIds", () => {
     mocks.hiddenFindMany.mockResolvedValue([]);
 
     await expect(collectAccessibleMovieIds("user-b")).resolves.toEqual(["m9"]);
+  });
+});
+
+describe("collectAccessibleTmdbIds", () => {
+  beforeEach(() => {
+    mocks.auditFindMany.mockResolvedValue([]);
+    mocks.collectionFindMany.mockResolvedValue([]);
+    mocks.ratingFindMany.mockResolvedValue([]);
+    mocks.hiddenFindMany.mockResolvedValue([]);
+    mocks.movieFindMany.mockReset();
+  });
+
+  it("returns unique TMDB ids for accessible movies", async () => {
+    mocks.auditFindMany.mockResolvedValue([{ resourceId: "m1" }, { resourceId: "m2" }]);
+    mocks.movieFindMany.mockResolvedValue([{ tmdbId: 42 }, { tmdbId: 42 }, { tmdbId: 99 }]);
+
+    await expect(collectAccessibleTmdbIds("user-a")).resolves.toEqual([42, 99]);
+  });
+
+  it("returns empty when user has no accessible movies", async () => {
+    await expect(collectAccessibleTmdbIds("user-empty")).resolves.toEqual([]);
+    expect(mocks.movieFindMany).not.toHaveBeenCalled();
   });
 });
 

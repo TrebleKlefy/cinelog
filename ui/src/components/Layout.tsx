@@ -5,6 +5,7 @@ import { AdminAuditPage } from "../views/admin/AdminAuditPage";
 import { AdminOverviewPage } from "../views/admin/AdminOverviewPage";
 import { AdminPortal } from "../views/admin/AdminPortal";
 import { AdminUsersPage } from "../views/admin/AdminUsersPage";
+import { AuditPage } from "../views/audit/AuditPage";
 import { CatalogPage } from "../views/catalog/CatalogPage";
 import { CollectionPage } from "../views/collection/CollectionPage";
 import { DashboardPage } from "../views/dashboard/DashboardPage";
@@ -28,6 +29,7 @@ export function Layout({ auth, onLogout }: { auth: AuthState; onLogout: () => vo
         <Route path="/search" element={<SearchPage auth={auth} />} />
         <Route path="/catalog" element={<CatalogPage auth={auth} />} />
         <Route path="/collection" element={<CollectionPage auth={auth} />} />
+        <Route path="/activity" element={<AuditPage auth={auth} />} />
         <Route path="/movies/:movieId" element={<MovieDetailPage auth={auth} />} />
       </Route>
       <Route path="*" element={<Navigate to="/search" replace />} />

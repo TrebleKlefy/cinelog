@@ -1,15 +1,15 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { CatalogMovieCard } from "./CatalogMovieCard";
 import { InlineState } from "./InlineState";
 import { MovieDetailModal } from "./MovieDetailModal";
+import { useTmdbCatalogImport } from "../hooks/useTmdbCatalogImport";
 import { api } from "../lib/api";
 import type { AuthState } from "../types/auth";
 
 type DashboardRecDTO = {
   title: string;
   year?: number;
-  movieId?: string;
   tmdbId?: number | null;
   posterUrl?: string | null;
   why: string;
@@ -19,10 +19,6 @@ type RecommendationResponseDTO = {
   recommendations: DashboardRecDTO[];
   disclaimer?: string;
 };
-
-type QuickRecView =
-  | { kind: "catalog"; id: string }
-  | { kind: "tmdb"; tmdbId: number };
 
 type RecommendationShelfProps = {
   auth: AuthState | null;
@@ -38,8 +34,8 @@ export function RecommendationShelf({
 }: RecommendationShelfProps) {
   const token = auth?.token;
   const userId = auth?.user?.id;
-  const qc = useQueryClient();
-  const [quickRec, setQuickRec] = useState<QuickRecView | null>(null);
+  const [tmdbPreviewId, setTmdbPreviewId] = useState<number | null>(null);
+  const { importTmdb, importLabel, isImportDisabled, importError, getStatus } = useTmdbCatalogImport(token, userId);
 
   const recs = useQuery({
     queryKey: ["recommendations", userId],
@@ -48,32 +44,16 @@ export function RecommendationShelf({
     enabled: Boolean(token && userId),
   });
 
-  const importMut = useMutation({
-    mutationFn: (tmdbId: number) =>
-      api<{ created: boolean; movie: { id: string; title: string } }>(
-        "/api/movies/import/tmdb",
-        { method: "POST", body: JSON.stringify({ tmdbId }) },
-        token,
-      ),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["recommendations"] });
-      await qc.invalidateQueries({ queryKey: ["search"] });
-      await qc.invalidateQueries({ queryKey: ["movies-all"] });
-      await qc.invalidateQueries({ queryKey: ["movies-catalog-home"] });
-      await qc.invalidateQueries({ queryKey: ["collection"] });
-    },
-  });
-
-  const items = recs.data?.recommendations ?? [];
+  const items = (recs.data?.recommendations ?? []).filter((r) => r.tmdbId != null);
 
   return (
     <>
       <MovieDetailModal
         auth={auth}
-        open={quickRec !== null}
-        onClose={() => setQuickRec(null)}
-        catalogMovieId={quickRec?.kind === "catalog" ? quickRec.id : null}
-        tmdbPreviewId={quickRec?.kind === "tmdb" ? quickRec.tmdbId : null}
+        open={tmdbPreviewId != null}
+        onClose={() => setTmdbPreviewId(null)}
+        catalogMovieId={null}
+        tmdbPreviewId={tmdbPreviewId}
       />
 
       <h2 className={headingClassName}>{heading}</h2>
@@ -90,47 +70,32 @@ export function RecommendationShelf({
       />
       <div className="catalog-grid dashboard-rec-grid">
         {items.map((r, i) => {
-          const catalogHref = r.movieId ? `/movies/${r.movieId}` : undefined;
-          const canModal = Boolean(r.movieId) || r.tmdbId != null;
-          const showTmdbImport = r.tmdbId != null && !r.movieId;
+          const tmdbId = r.tmdbId!;
+          const cardTitle = r.year != null ? `${r.title} (${r.year})` : r.title;
 
           return (
             <CatalogMovieCard
-              key={`reco-${r.movieId ?? (r.tmdbId != null ? `tmdb:${r.tmdbId}` : "na")}-${i}`}
-              title={r.movieId ? r.title : r.year != null ? `${r.title} (${r.year})` : r.title}
+              key={`reco-tmdb:${tmdbId}-${i}`}
+              title={cardTitle}
               posterUrl={r.posterUrl ?? null}
-              detailHref={catalogHref}
-              onPosterClick={
-                canModal
-                  ? () => {
-                      if (r.movieId) setQuickRec({ kind: "catalog", id: r.movieId });
-                      else if (r.tmdbId != null) setQuickRec({ kind: "tmdb", tmdbId: r.tmdbId });
-                    }
-                  : undefined
-              }
+              onPosterClick={() => setTmdbPreviewId(tmdbId)}
               footer={
                 <div className="dashboard-rec-card-footer">
                   <p className="dashboard-rec-footer__why">{r.why}</p>
                   <div className="dashboard-rec-footer-slot p-2">
-                    {showTmdbImport ? (
-                      <>
-                        <button
-                          type="button"
-                          className="button button--gold button--sm dashboard-rec-import-btn pt-2"
-                          disabled={importMut.isPending || !token}
-                          onClick={() => r.tmdbId != null && importMut.mutate(r.tmdbId)}
-                        >
-                          {!token ? "Sign in to import" : importMut.isPending ? "Adding…" : "Add to catalog"}
-                        </button>
-                        {importMut.isError && importMut.variables === r.tmdbId ? (
-                          <p className="status status--error dashboard-rec-import-status">
-                            {(importMut.error as Error).message}
-                          </p>
-                        ) : null}
-                        {importMut.isSuccess && importMut.variables === r.tmdbId ? (
-                          <p className="status status--success dashboard-rec-import-status">Added — refresh list or reopen details.</p>
-                        ) : null}
-                      </>
+                    <button
+                      type="button"
+                      className="button button--gold button--sm dashboard-rec-import-btn pt-2"
+                      disabled={isImportDisabled(tmdbId)}
+                      onClick={() => importTmdb(tmdbId)}
+                    >
+                      {importLabel(tmdbId)}
+                    </button>
+                    {importError(tmdbId) ? (
+                      <p className="status status--error dashboard-rec-import-status">{importError(tmdbId)}</p>
+                    ) : null}
+                    {getStatus(tmdbId) === "added" ? (
+                      <p className="status status--success dashboard-rec-import-status">In your catalog — details sync in the background.</p>
                     ) : null}
                   </div>
                 </div>

@@ -49,6 +49,8 @@ export function MovieDetailPage({ auth }: { auth: AuthState }) {
       await qc.invalidateQueries({ queryKey: ["movie"] });
       await qc.invalidateQueries({ queryKey: ["movie-detail-modal"] });
       await qc.invalidateQueries({ queryKey: ["recommendations"] });
+      await qc.invalidateQueries({ queryKey: ["catalog-tmdb-ids"] });
+      await qc.invalidateQueries({ queryKey: ["tmdb-browse"] });
       setCatalogRemovalOpen(false);
       navigate("/catalog");
     },

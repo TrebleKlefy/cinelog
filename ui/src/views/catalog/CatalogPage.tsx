@@ -63,6 +63,9 @@ export function CatalogPage({ auth }: { auth: AuthState }) {
   const token = auth?.token;
   const userId = auth?.user?.id;
   const [q, setQ] = useState("");
+  const [cast, setCast] = useState("");
+  const [director, setDirector] = useState("");
+  const [genre, setGenre] = useState("");
   const [page, setPage] = useState(1);
   const [quickView, setQuickView] = useState<QuickMovieView | null>(null);
   const [catalogRemoval, setCatalogRemoval] = useState<{ id: string; title: string } | null>(null);
@@ -78,15 +81,21 @@ export function CatalogPage({ auth }: { auth: AuthState }) {
       await qc.invalidateQueries({ queryKey: ["movie"] });
       await qc.invalidateQueries({ queryKey: ["movie-detail-modal"] });
       await qc.invalidateQueries({ queryKey: ["recommendations"] });
+      await qc.invalidateQueries({ queryKey: ["catalog-tmdb-ids"] });
+      await qc.invalidateQueries({ queryKey: ["tmdb-browse"] });
       setCatalogRemoval(null);
     },
   });
 
-  const typing = q.trim().length > 1;
+  const titleFilter = q.trim().length > 1 ? q.trim() : "";
+  const castFilter = cast.trim();
+  const directorFilter = director.trim();
+  const genreFilter = genre.trim();
+  const typing = Boolean(titleFilter || castFilter || directorFilter || genreFilter);
 
   useEffect(() => {
     setPage(1);
-  }, [q]);
+  }, [titleFilter, castFilter, directorFilter, genreFilter]);
 
   const catalogBrowse = useQuery({
     queryKey: ["movies-catalog-home", userId, page],
@@ -97,13 +106,18 @@ export function CatalogPage({ auth }: { auth: AuthState }) {
   });
 
   const catalogFilter = useQuery({
-    queryKey: ["search", userId, q, page],
-    queryFn: () =>
-      api<CatalogPagedResponse>(
-        `/api/movies?q=${encodeURIComponent(q)}&page=${page}&pageSize=${MOVIES_PAGE_SIZE}`,
-        undefined,
-        token,
-      ),
+    queryKey: ["search", userId, titleFilter, castFilter, directorFilter, genreFilter, page],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(MOVIES_PAGE_SIZE),
+      });
+      if (titleFilter) params.set("q", titleFilter);
+      if (castFilter) params.set("cast", castFilter);
+      if (directorFilter) params.set("director", directorFilter);
+      if (genreFilter) params.set("genre", genreFilter);
+      return api<CatalogPagedResponse>(`/api/movies?${params.toString()}`, undefined, token);
+    },
     enabled: typing && Boolean(token && userId),
   });
 
@@ -177,6 +191,20 @@ export function CatalogPage({ auth }: { auth: AuthState }) {
               placeholder={`All movies · ${MOVIES_PAGE_SIZE} per page · type 2+ characters to filter`}
             />
           </label>
+          <div className="row">
+            <label className="field field--on-dark">
+              <span>Cast</span>
+              <input value={cast} onChange={(e) => setCast(e.target.value)} placeholder="Actor name" />
+            </label>
+            <label className="field field--on-dark">
+              <span>Director</span>
+              <input value={director} onChange={(e) => setDirector(e.target.value)} placeholder="Director name" />
+            </label>
+            <label className="field field--on-dark">
+              <span>Genre</span>
+              <input value={genre} onChange={(e) => setGenre(e.target.value)} placeholder="Genre name" />
+            </label>
+          </div>
           <InlineState
             loading={loading}
             error={error ? (error as Error).message : undefined}

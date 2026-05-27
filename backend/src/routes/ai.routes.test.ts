@@ -17,6 +17,11 @@ const prisma = vi.hoisted(() => ({
 }));
 
 const movieCatalogWhere = vi.hoisted(() => vi.fn());
+const hydrateNlSearchMatchesMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../services/recommendationResolve.js", () => ({
+  hydrateNlSearchMatches: (...args: unknown[]) => hydrateNlSearchMatchesMock(...args),
+}));
 
 const streamMovieAgentChatMock = vi.hoisted(() =>
   vi.fn(async ({ res }: { res: { status: (code: number) => { end: () => void } } }) => {
@@ -80,7 +85,7 @@ describe("/api/ai", () => {
     movieCatalogWhere.mockReset().mockResolvedValue(null);
 
     vi.spyOn(llm, "runNlSearchWithActiveLlm").mockResolvedValue({
-      result: { matches: [{ title: "Inception", year: 2010, movieId, reason: "dreams" }] },
+      result: { matches: [{ title: "Inception", year: 2010, reason: "dreams" }] },
       config: { providerKey: "groq", modelKey: "llama-mini" },
       usedLiveLlm: true,
     });
@@ -90,10 +95,9 @@ describe("/api/ai", () => {
           {
             title: "Rec",
             year: 2015,
-            movieId,
             why: "space",
-            posterUrl: undefined,
-            tmdbId: null,
+            posterUrl: "https://cdn/poster.jpg",
+            tmdbId: 123,
           },
         ],
         disclaimer: "unit disclaimer",
@@ -110,15 +114,22 @@ describe("/api/ai", () => {
     streamMovieAgentChatMock.mockReset().mockImplementation(async ({ res }: { res: { status: (n: number) => { end: () => void } } }) => {
       res.status(200).end();
     });
+    hydrateNlSearchMatchesMock.mockReset().mockImplementation(async (matches: Array<{ title: string; year?: number; movieId?: string; reason: string }>) =>
+      matches.map((m) => ({
+        ...m,
+        tmdbId: 27205,
+        posterUrl: "https://image.tmdb.org/t/p/w500/inception.jpg",
+        voteAverage: 8.8,
+      })),
+    );
   });
 
   it("executes concierge NL searches with audited metadata", async () => {
-    prisma.movie.findMany.mockResolvedValueOnce([
-      { id: movieId, title: "Inception", releaseYear: 2010 },
-    ]);
     const res = await request(app).post("/api/ai/nl-search").set(headers()).send({ query: "mind heist" });
     expect(res.status).toBe(200);
-    expect(res.body.matches[0]?.movieId).toBe(movieId);
+    expect(res.body.matches[0]?.tmdbId).toBe(27205);
+    expect(res.body.matches[0]?.posterUrl).toContain("inception.jpg");
+    expect(hydrateNlSearchMatchesMock).toHaveBeenCalled();
   });
 
   it("rejects tiny NL payloads", async () => {
@@ -126,14 +137,11 @@ describe("/api/ai", () => {
     expect(res.status).toBe(400);
   });
 
-  it("renders personalization recommendations plus poster hydrate", async () => {
-    prisma.movie.findMany
-      .mockResolvedValueOnce([{ id: movieId, title: "Rec", releaseYear: 2015 }])
-      .mockResolvedValueOnce([{ id: movieId, posterUrl: "/poster.jpg" }]);
-
+  it("returns TMDB-backed recommendations", async () => {
     const res = await request(app).post("/api/ai/recommendations").set(headers()).send({});
     expect(res.status).toBe(200);
-    expect(res.body.recommendations[0].posterUrl).toBe("/poster.jpg");
+    expect(res.body.recommendations[0].posterUrl).toBe("https://cdn/poster.jpg");
+    expect(res.body.recommendations[0].tmdbId).toBe(123);
   });
 
   it("loads bootstrap previews from TMDB shims", async () => {
@@ -158,22 +166,11 @@ describe("/api/ai", () => {
     await request(app).post("/api/ai/nl-search").send({ query: "hello ai" }).expect(401);
   });
 
-  it("threads catalog visibility predicates into prisma movie scans", async () => {
-    const vis = { id: { in: [movieId] } };
-    movieCatalogWhere.mockResolvedValueOnce(vis);
-    prisma.movie.findMany.mockResolvedValueOnce([{ id: movieId, title: "Inception", releaseYear: 2010 }]);
-    const res = await request(app).post("/api/ai/nl-search").set(headers()).send({ query: "heist vibes" });
-    expect(res.status).toBe(200);
-    expect(prisma.movie.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: vis }));
-  });
-
   it("builds personalization context from ratings when shelves are absent", async () => {
     prisma.userCollection.findFirst.mockResolvedValueOnce(null);
     prisma.userMovieRating.findMany.mockResolvedValueOnce([
       { rating: 9, movie: { title: "Arrival", releaseYear: 2016 } },
     ]);
-    prisma.movie.findMany.mockResolvedValueOnce([{ id: movieId, title: "Rec", releaseYear: 2015 }]);
-    prisma.movie.findMany.mockResolvedValueOnce([{ id: movieId, posterUrl: "/p.jpg" }]);
 
     await request(app).post("/api/ai/recommendations").set(headers()).send({}).expect(200);
     expect(llm.runRecommendationsWithActiveLlm).toHaveBeenCalledWith(
@@ -183,18 +180,15 @@ describe("/api/ai", () => {
     );
   });
 
-  it("skips poster hydration when the resolver already inlined artwork", async () => {
+  it("returns recommendation payloads from the resolver unchanged", async () => {
     vi.spyOn(llm, "runRecommendationsWithActiveLlm").mockResolvedValueOnce({
       result: {
-        recommendations: [{ title: "T", year: 2015, movieId, why: "x", posterUrl: "https://cdn/x.jpg", tmdbId: null }],
+        recommendations: [{ title: "T", year: 2015, why: "x", posterUrl: "https://cdn/x.jpg", tmdbId: 999 }],
         disclaimer: "",
       },
       config: { providerKey: "groq", modelKey: "llama-mini" },
       usedLiveLlm: false,
     });
-
-    prisma.movie.findMany.mockResolvedValueOnce([{ id: movieId, title: "Hold", releaseYear: 2001 }]);
-    prisma.movie.findMany.mockResolvedValueOnce([]);
 
     const res = await request(app).post("/api/ai/recommendations").set(headers()).send({});
     expect(res.status).toBe(200);
@@ -212,9 +206,15 @@ describe("/api/ai", () => {
     expect(res.status).toBe(500);
   });
 
-  it("delegates NL search prisma failures downstream", async () => {
-    prisma.movie.findMany.mockRejectedValueOnce(new Error("offline"));
+  it("delegates NL search LLM failures downstream", async () => {
+    vi.spyOn(llm, "runNlSearchWithActiveLlm").mockRejectedValueOnce(new Error("offline"));
     const res = await request(app).post("/api/ai/nl-search").set(headers()).send({ query: "robots in space" });
+    expect(res.status).toBe(500);
+  });
+
+  it("delegates recommendation LLM failures downstream", async () => {
+    vi.spyOn(llm, "runRecommendationsWithActiveLlm").mockRejectedValueOnce(new Error("reco offline"));
+    const res = await request(app).post("/api/ai/recommendations").set(headers()).send({});
     expect(res.status).toBe(500);
   });
 });

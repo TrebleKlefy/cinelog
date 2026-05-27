@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ConfirmDialog, RemoveFromCatalogCopy } from "./ConfirmDialog";
 import { MoviePoster } from "./MoviePoster";
+import { useTmdbCatalogImport } from "../hooks/useTmdbCatalogImport";
 import { api } from "../lib/api";
 import type { AuthState } from "../types/auth";
 
@@ -86,6 +87,8 @@ export function MovieDetailModal({
     if (open) setCastExpanded(false);
   }, [open, catalogMovieId, tmdbPreviewId]);
 
+  const { importTmdb, importLabel, isImportDisabled, importError, addedMovie, getStatus } = useTmdbCatalogImport(token, userId);
+
   const ratingMutation = useMutation({
     mutationFn: (rating: number) =>
       api<{ ok: boolean }>(
@@ -103,23 +106,6 @@ export function MovieDetailModal({
     },
   });
 
-  const importFromTmdbMutation = useMutation({
-    mutationFn: () =>
-      api<{ created: boolean; movie: { id: string; title: string } }>(
-        "/api/movies/import/tmdb",
-        { method: "POST", body: JSON.stringify({ tmdbId: tmdbPreviewId as number }) },
-        token,
-      ),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["recommendations"] });
-      await qc.invalidateQueries({ queryKey: ["search"] });
-      await qc.invalidateQueries({ queryKey: ["movies-all"] });
-      await qc.invalidateQueries({ queryKey: ["movies-catalog-home"] });
-      await qc.invalidateQueries({ queryKey: ["collection"] });
-      await qc.invalidateQueries({ queryKey: ["movie-detail-modal-tmdb", tmdbPreviewId] });
-    },
-  });
-
   const removeFromCatalogMutation = useMutation({
     mutationFn: () =>
       api<{ ok: boolean }>(`/api/me/catalog/movies/${catalogMovieId as string}`, { method: "DELETE" }, token),
@@ -131,13 +117,11 @@ export function MovieDetailModal({
       await qc.invalidateQueries({ queryKey: ["movie"] });
       await qc.invalidateQueries({ queryKey: ["movie-detail-modal"] });
       await qc.invalidateQueries({ queryKey: ["recommendations"] });
+      await qc.invalidateQueries({ queryKey: ["catalog-tmdb-ids"] });
+      await qc.invalidateQueries({ queryKey: ["tmdb-browse"] });
       onClose();
     },
   });
-
-  useEffect(() => {
-    if (!open) importFromTmdbMutation.reset();
-  }, [open, tmdbPreviewId]);
 
   useEffect(() => {
     if (!open) removeFromCatalogMutation.reset();
@@ -416,23 +400,27 @@ export function MovieDetailModal({
                         <button
                           type="button"
                           className="button button--gold movie-modal-submit-rating"
-                          disabled={importFromTmdbMutation.isPending || tmdbPreviewId == null}
+                          disabled={tmdbPreviewId == null || isImportDisabled(tmdbPreviewId)}
                           onClick={() => {
-                            if (tmdbPreviewId != null) importFromTmdbMutation.mutate();
+                            if (tmdbPreviewId != null) importTmdb(tmdbPreviewId);
                           }}
                         >
-                          {importFromTmdbMutation.isPending ? "Adding…" : "Add to catalog"}
+                          {tmdbPreviewId != null ? importLabel(tmdbPreviewId) : "Add to catalog"}
                         </button>
-                        {importFromTmdbMutation.isSuccess && importFromTmdbMutation.data ? (
+                        {tmdbPreviewId != null && getStatus(tmdbPreviewId) === "added" && addedMovie(tmdbPreviewId) ? (
                           <p className="status status--success">
-                            Saved to your catalog.{" "}
-                            <Link to={`/movies/${importFromTmdbMutation.data.movie.id}`} className="movie-modal-toolbar-link" onClick={onClose}>
+                            Saved to your catalog. Cast and scores sync in the background.{" "}
+                            <Link
+                              to={`/movies/${addedMovie(tmdbPreviewId)!.id}`}
+                              className="movie-modal-toolbar-link"
+                              onClick={onClose}
+                            >
                               Open movie page
                             </Link>
                           </p>
                         ) : null}
-                        {importFromTmdbMutation.isError ? (
-                          <p className="status status--error">{(importFromTmdbMutation.error as Error).message}</p>
+                        {tmdbPreviewId != null && importError(tmdbPreviewId) ? (
+                          <p className="status status--error">{importError(tmdbPreviewId)}</p>
                         ) : null}
                       </div>
                     )}

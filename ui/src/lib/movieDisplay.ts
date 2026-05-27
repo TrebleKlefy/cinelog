@@ -15,6 +15,19 @@ export function getCatalogBadgeScore(ratings: ExternalRatingDTO[] | undefined): 
   return null;
 }
 
+/** Rotten Tomatoes critic score 0–100 when stored from OMDb import. */
+export function getRottenTomatoesPercent(ratings: ExternalRatingDTO[] | undefined): number | null {
+  const rt = ratings?.find((x) => x.source === "ROTTEN_TOMATOES");
+  if (rt == null || rt.scale !== 100 || !Number.isFinite(rt.value)) return null;
+  return rt.value;
+}
+
+export function rtBadgeTier(percent: number): "high" | "mid" | "low" {
+  if (percent >= 70) return "high";
+  if (percent >= 50) return "mid";
+  return "low";
+}
+
 export function formatRuntimeMinutes(min: number | null | undefined): string | null {
   if (min == null || min <= 0) return null;
   const h = Math.floor(min / 60);

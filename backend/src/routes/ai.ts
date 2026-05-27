@@ -7,10 +7,9 @@ import {
   getActiveLlmConfig,
   runNlSearchWithActiveLlm,
   runRecommendationsWithActiveLlm,
-  type RecommendationRow,
 } from "../services/llm.js";
 import { buildMovieAgentBootstrap } from "../services/movieAgentBootstrap.js";
-import { movieVisibilityWhere } from "../services/movieCatalogScope.js";
+import { hydrateNlSearchMatches } from "../services/recommendationResolve.js";
 import { streamMovieAgentChat } from "../services/movieAgentChat.js";
 
 export const aiRouter = Router();
@@ -25,22 +24,11 @@ aiRouter.post("/nl-search", async (req, res, next) => {
     const body = schema.parse(req.body);
     const userId = req.user!.id;
 
-    const visibility = await movieVisibilityWhere(req.user!.role, userId);
-
-    const catalogRows = await prisma.movie.findMany({
-      take: 80,
-      orderBy: { title: "asc" },
-      select: { id: true, title: true, releaseYear: true },
-      ...(visibility ? { where: visibility } : {}),
-    });
-
-    const catalogContext = catalogRows.map((m) => `- ${m.title} (${m.releaseYear}) [${m.id}]`).join("\n");
-
     const out = await runNlSearchWithActiveLlm({
       query: body.query,
-      catalogContext,
-      catalog: catalogRows.map((m) => ({ id: m.id, title: m.title, year: m.releaseYear })),
     });
+
+    const hydratedMatches = await hydrateNlSearchMatches(out.result.matches ?? []);
 
     await writeAuditLog({
       userId,
@@ -54,7 +42,7 @@ aiRouter.post("/nl-search", async (req, res, next) => {
       },
     });
 
-    res.json(out.result);
+    res.json({ ...out.result, matches: hydratedMatches });
   } catch (e) {
     next(e);
   }
@@ -92,21 +80,9 @@ aiRouter.post("/recommendations", async (req, res, next) => {
       ...ratings.map((r) => `- Rated ${r.rating}/10: ${r.movie.title} (${r.movie.releaseYear})`),
     ].join("\n");
 
-    const visibility = await movieVisibilityWhere(req.user!.role, userId);
-
-    const catalogRows = await prisma.movie.findMany({
-      take: 120,
-      orderBy: { title: "asc" },
-      select: { id: true, title: true, releaseYear: true },
-      ...(visibility ? { where: visibility } : {}),
-    });
-
     const out = await runRecommendationsWithActiveLlm({
       historyContext: historyLines || "(no history yet)",
-      catalog: catalogRows.map((m) => ({ id: m.id, title: m.title, year: m.releaseYear })),
     });
-
-    await hydrateRecommendationPosterFields(out.result.recommendations);
 
     await writeAuditLog({
       userId,
@@ -180,19 +156,3 @@ aiRouter.post("/agent/chat", async (req, res, next) => {
     next(e);
   }
 });
-
-/** Fill posterUrl for catalog-linked rows when prisma poster wasn't threaded through resolver */
-async function hydrateRecommendationPosterFields(rows: RecommendationRow[]): Promise<void> {
-  const ids = [...new Set(rows.map((r) => r.movieId).filter(Boolean))] as string[];
-  if (!ids.length) return;
-  const posters = await prisma.movie.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, posterUrl: true },
-  });
-  const map = new Map(posters.map((p) => [p.id, p.posterUrl]));
-  for (const r of rows) {
-    if (r.movieId && (r.posterUrl === undefined || r.posterUrl === null)) {
-      r.posterUrl = map.get(r.movieId) ?? null;
-    }
-  }
-}

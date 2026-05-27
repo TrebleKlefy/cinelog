@@ -38,6 +38,25 @@ export async function collectAccessibleMovieIds(userId: string): Promise<string[
   return [...ids].filter((id) => !hidden.has(id));
 }
 
+/** TMDB ids for movies this user can see in their catalog (imports, shelf, ratings; minus hidden). */
+export async function collectAccessibleTmdbIds(userId: string): Promise<number[]> {
+  const movieIds = await collectAccessibleMovieIds(userId);
+  if (movieIds.length === 0) return [];
+
+  const rows = await prisma.movie.findMany({
+    where: { id: { in: movieIds }, tmdbId: { not: null } },
+    select: { tmdbId: true },
+  });
+
+  return [
+    ...new Set(
+      rows
+        .map((r) => r.tmdbId)
+        .filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0),
+    ),
+  ];
+}
+
 /** Extra Prisma WHERE for movie rows non-admin callers may see (`null` = no restriction / admin). */
 export async function movieVisibilityWhere(role: UserRole, userId: string): Promise<Prisma.MovieWhereInput | null> {
   const hiddenMovies = await prisma.userHiddenMovie.findMany({

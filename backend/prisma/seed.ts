@@ -1,10 +1,38 @@
 import "dotenv/config";
-import { PrismaClient, UserRole, ExternalRatingSource } from "@prisma/client";
+import { PrismaClient, UserRole } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
+/** Demo seed titles removed from the product — purge on every seed run. */
+const REMOVED_SEED_MOVIE_IDS = [
+  "seed-movie-inception",
+  "seed-movie-matrix",
+  "seed-movie-interstellar",
+] as const;
+
+const REMOVED_DEMO_TITLES = ["Inception", "The Matrix", "Interstellar"] as const;
+
+async function purgeRemovedDemoMovies(): Promise<number> {
+  const byId = await prisma.movie.deleteMany({
+    where: { id: { in: [...REMOVED_SEED_MOVIE_IDS] } },
+  });
+
+  const byTitle = await prisma.movie.deleteMany({
+    where: {
+      title: { in: [...REMOVED_DEMO_TITLES], mode: "insensitive" },
+    },
+  });
+
+  return byId.count + byTitle.count;
+}
+
 async function main() {
+  const purged = await purgeRemovedDemoMovies();
+  if (purged > 0) {
+    console.log(`Purged ${purged} demo movie row(s) (Inception, The Matrix, Interstellar).`);
+  }
+
   const openai = await prisma.llmProvider.upsert({
     where: { providerKey: "openai" },
     update: {},
@@ -35,7 +63,7 @@ async function main() {
     },
   });
 
-  const openaiModel = await prisma.llmModel.upsert({
+  await prisma.llmModel.upsert({
     where: {
       providerId_modelKey: { providerId: openai.id, modelKey: "gpt-4o-mini" },
     },
@@ -99,133 +127,12 @@ async function main() {
     },
   });
 
-  const genres = await Promise.all([
+  await Promise.all([
     prisma.genre.upsert({ where: { name: "Sci-Fi" }, update: {}, create: { name: "Sci-Fi" } }),
     prisma.genre.upsert({ where: { name: "Thriller" }, update: {}, create: { name: "Thriller" } }),
     prisma.genre.upsert({ where: { name: "Drama" }, update: {}, create: { name: "Drama" } }),
     prisma.genre.upsert({ where: { name: "Action" }, update: {}, create: { name: "Action" } }),
   ]);
-
-  const nolan = await prisma.person.upsert({
-    where: { id: "seed-person-nolan" },
-    update: {},
-    create: { id: "seed-person-nolan", name: "Christopher Nolan" },
-  });
-
-  const reeves = await prisma.person.upsert({
-    where: { id: "seed-person-reeves" },
-    update: {},
-    create: { id: "seed-person-reeves", name: "Keanu Reeves" },
-  });
-
-  const moss = await prisma.person.upsert({
-    where: { id: "seed-person-moss" },
-    update: {},
-    create: { id: "seed-person-moss", name: "Carrie-Anne Moss" },
-  });
-
-  const m1 = await prisma.movie.upsert({
-    where: { id: "seed-movie-inception" },
-    update: {},
-    create: {
-      id: "seed-movie-inception",
-      title: "Inception",
-      releaseYear: 2010,
-      runtimeMinutes: 148,
-      synopsis: "A thief who steals corporate secrets through dream-sharing technology is offered a chance at redemption.",
-      posterUrl: null,
-    },
-  });
-
-  const m2 = await prisma.movie.upsert({
-    where: { id: "seed-movie-matrix" },
-    update: {},
-    create: {
-      id: "seed-movie-matrix",
-      title: "The Matrix",
-      releaseYear: 1999,
-      runtimeMinutes: 136,
-      synopsis: "A computer hacker learns about the true nature of reality and his role in the war against its controllers.",
-      posterUrl: null,
-    },
-  });
-
-  const m3 = await prisma.movie.upsert({
-    where: { id: "seed-movie-interstellar" },
-    update: {},
-    create: {
-      id: "seed-movie-interstellar",
-      title: "Interstellar",
-      releaseYear: 2014,
-      runtimeMinutes: 169,
-      synopsis: "Explorers travel through a wormhole in space to ensure humanity's survival.",
-      posterUrl: null,
-    },
-  });
-
-  await prisma.movieDirector.upsert({
-    where: { movieId_personId: { movieId: m1.id, personId: nolan.id } },
-    update: {},
-    create: { movieId: m1.id, personId: nolan.id },
-  });
-  await prisma.movieDirector.upsert({
-    where: { movieId_personId: { movieId: m3.id, personId: nolan.id } },
-    update: {},
-    create: { movieId: m3.id, personId: nolan.id },
-  });
-
-  await prisma.movieCast.createMany({
-    data: [
-      { movieId: m2.id, personId: reeves.id, characterName: "Neo" },
-      { movieId: m2.id, personId: moss.id, characterName: "Trinity" },
-    ],
-    skipDuplicates: true,
-  });
-
-  const sciFi = genres.find((g) => g.name === "Sci-Fi")!;
-  const action = genres.find((g) => g.name === "Action")!;
-  const drama = genres.find((g) => g.name === "Drama")!;
-
-  await prisma.movieGenre.createMany({
-    data: [
-      { movieId: m1.id, genreId: sciFi.id },
-      { movieId: m1.id, genreId: action.id },
-      { movieId: m2.id, genreId: sciFi.id },
-      { movieId: m2.id, genreId: action.id },
-      { movieId: m3.id, genreId: sciFi.id },
-      { movieId: m3.id, genreId: drama.id },
-    ],
-    skipDuplicates: true,
-  });
-
-  for (const [movieId, imdb, rt] of [
-    [m1.id, { v: 8.8, raw: "8.8/10" }, { v: 87, raw: "87%" }],
-    [m2.id, { v: 8.7, raw: "8.7/10" }, { v: 83, raw: "83%" }],
-    [m3.id, { v: 8.7, raw: "8.7/10" }, { v: 72, raw: "72%" }],
-  ] as const) {
-    await prisma.movieExternalRating.upsert({
-      where: { movieId_source: { movieId, source: ExternalRatingSource.IMDB } },
-      update: { ratingValue: imdb.v, ratingScale: 10, ratingRaw: imdb.raw },
-      create: {
-        movieId,
-        source: ExternalRatingSource.IMDB,
-        ratingValue: imdb.v,
-        ratingScale: 10,
-        ratingRaw: imdb.raw,
-      },
-    });
-    await prisma.movieExternalRating.upsert({
-      where: { movieId_source: { movieId, source: ExternalRatingSource.ROTTEN_TOMATOES } },
-      update: { ratingValue: rt.v, ratingScale: 100, ratingRaw: rt.raw },
-      create: {
-        movieId,
-        source: ExternalRatingSource.ROTTEN_TOMATOES,
-        ratingValue: rt.v,
-        ratingScale: 100,
-        ratingRaw: rt.raw,
-      },
-    });
-  }
 
   const adminPass = await bcrypt.hash("Admin123!", 10);
   const userPass = await bcrypt.hash("User123!", 10);
@@ -263,7 +170,7 @@ async function main() {
     },
   });
 
-  const adminCollection = await prisma.userCollection.upsert({
+  await prisma.userCollection.upsert({
     where: { slug: "admin" },
     update: {},
     create: {
@@ -273,17 +180,6 @@ async function main() {
       isPublic: false,
     },
   });
-
-  const demoColl = await prisma.userCollection.findFirst({ where: { userId: user.id } });
-  if (demoColl) {
-    await prisma.collectionMovie.upsert({
-      where: {
-        collectionId_movieId: { collectionId: demoColl.id, movieId: m2.id },
-      },
-      update: {},
-      create: { collectionId: demoColl.id, movieId: m2.id },
-    });
-  }
 
   console.log("Seed complete. Users: admin@demo.com / Admin123!, user@demo.com / User123!");
 }

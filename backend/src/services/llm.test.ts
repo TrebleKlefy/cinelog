@@ -34,6 +34,7 @@ import {
   chatCompletionActiveModel,
   findCatalogMatch,
   getActiveLlmConfig,
+  getActiveLlmReadiness,
   normalizeRecommendationsFromParse,
   normalizeTitleForMatch,
   parseJsonFromLlmText,
@@ -109,6 +110,55 @@ describe("getActiveLlmConfig", () => {
     await expect(getActiveLlmConfig()).resolves.toEqual({
       providerKey: "groq",
       modelKey: "llama",
+    });
+  });
+});
+
+describe("getActiveLlmReadiness", () => {
+  beforeEach(() => {
+    prismaHoisted.appSettingsFind.mockResolvedValue({
+      activeProvider: { providerKey: "groq" },
+      activeModel: { modelKey: "llama" },
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it("marks groq ready when GROQ_API_KEY is set", async () => {
+    vi.stubEnv("GROQ_API_KEY", "gq-test");
+    await expect(getActiveLlmReadiness()).resolves.toEqual({
+      providerKey: "groq",
+      modelKey: "llama",
+      ready: true,
+    });
+  });
+
+  it("marks groq not ready when the API key is missing", async () => {
+    await expect(getActiveLlmReadiness()).resolves.toMatchObject({
+      ready: false,
+      reason: "Missing GROQ_API_KEY",
+    });
+  });
+
+  it("marks unsupported providers as not ready", async () => {
+    prismaHoisted.appSettingsFind.mockResolvedValueOnce({
+      activeProvider: { providerKey: "anthropic" },
+      activeModel: { modelKey: "claude" },
+    });
+    await expect(getActiveLlmReadiness()).resolves.toMatchObject({
+      ready: false,
+      reason: expect.stringContaining("no live chat adapter"),
+    });
+  });
+
+  it("marks openai ready when OPENAI_API_KEY is set", async () => {
+    prismaHoisted.appSettingsFind.mockResolvedValueOnce({
+      activeProvider: { providerKey: "openai" },
+      activeModel: { modelKey: "gpt-4o-mini" },
+    });
+    vi.stubEnv("OPENAI_API_KEY", "oa-test");
+    await expect(getActiveLlmReadiness()).resolves.toMatchObject({
+      providerKey: "openai",
+      ready: true,
     });
   });
 });
@@ -201,7 +251,7 @@ describe("runNlSearchWithActiveLlm", () => {
         {
           message: {
             content: JSON.stringify({
-              matches: [{ title: "Z", movieId: "mid", reason: "reason" }],
+              matches: [{ title: "Z", reason: "reason" }],
             }),
           },
         },
@@ -212,11 +262,9 @@ describe("runNlSearchWithActiveLlm", () => {
   it("parses NL search payloads from Groq", async () => {
     const out = await runNlSearchWithActiveLlm({
       query: "hello",
-      catalogContext: "ctx",
-      catalog: [{ id: "mid", title: "Z", year: 2001 }],
     });
     expect(out.usedLiveLlm).toBe(true);
-    expect(out.result.matches[0]?.movieId).toBe("mid");
+    expect(out.result.matches[0]?.title).toBe("Z");
   });
 
   it("parses NL search payloads from OpenAI chat completions", async () => {
@@ -233,7 +281,7 @@ describe("runNlSearchWithActiveLlm", () => {
           {
             message: {
               content: JSON.stringify({
-                matches: [{ title: "Zodiac", movieId: "uu1", reason: "match" }],
+                matches: [{ title: "Zodiac", reason: "match" }],
               }),
             },
           },
@@ -244,34 +292,26 @@ describe("runNlSearchWithActiveLlm", () => {
     try {
       const out = await runNlSearchWithActiveLlm({
         query: "crime",
-        catalogContext: "ctx",
-        catalog: [{ id: "uu1", title: "Zodiac", year: 2007 }],
       });
       expect(out.usedLiveLlm).toBe(true);
-      expect(out.result.matches[0]?.movieId).toBe("uu1");
+      expect(out.result.matches[0]?.title).toBe("Zodiac");
       expect(spy).toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
   });
 
-  it("falls back to keyword mock pipeline on provider errors", async () => {
+  it("falls back to empty mock results on provider errors", async () => {
     groqCreate.mockRejectedValueOnce(new Error("rate limit"));
-    const catalog = [
-      { id: "a", title: "Tiger Highway", year: 2019 },
-      { id: "b", title: "Tiger Stripes", year: 2020 },
-    ];
     const out = await runNlSearchWithActiveLlm({
       query: "tigers",
-      catalogContext: "",
-      catalog,
     });
 
     expect(out.usedLiveLlm).toBe(false);
-    expect(out.result.matches.every((row) => row.reason.includes("Keyword match"))).toBe(true);
+    expect(out.result.matches).toHaveLength(0);
   });
 
-  it("uses heuristic mock NL search when provider lacks HTTP adapter", async () => {
+  it("uses empty mock NL search when provider lacks HTTP adapter", async () => {
     prismaHoisted.appSettingsFind.mockResolvedValue({
       activeProvider: { providerKey: "anthropic" },
       activeModel: { modelKey: "claude-3-haiku" },
@@ -279,11 +319,9 @@ describe("runNlSearchWithActiveLlm", () => {
 
     const out = await runNlSearchWithActiveLlm({
       query: "space",
-      catalogContext: "",
-      catalog: [{ id: "s", title: "Space Odyssey", year: 2001 }],
     });
     expect(out.usedLiveLlm).toBe(false);
-    expect(out.result.matches[0]?.title).toContain("Odyssey");
+    expect(out.result.matches).toHaveLength(0);
   });
 });
 
@@ -304,7 +342,6 @@ describe("runRecommendationsWithActiveLlm", () => {
   it("streams through live resolver for Groq", async () => {
     const out = await runRecommendationsWithActiveLlm({
       historyContext: "(none)",
-      catalog: [{ id: "movie-uuid", title: "Sample", year: 2009 }],
     });
     expect(runLiveReco).toHaveBeenCalled();
     expect(out.usedLiveLlm).toBe(true);
@@ -318,12 +355,11 @@ describe("runRecommendationsWithActiveLlm", () => {
     });
     await runRecommendationsWithActiveLlm({
       historyContext: "ctx",
-      catalog: [{ id: "a", title: "A", year: 2001 }],
     });
     expect(runLiveReco).toHaveBeenCalledTimes(1);
   });
 
-  it("returns seeded mock catalog when provider is offline-only", async () => {
+  it("returns empty mock recommendations when provider is offline-only", async () => {
     prismaHoisted.appSettingsFind.mockResolvedValueOnce({
       activeProvider: { providerKey: "anthropic" },
       activeModel: { modelKey: "claude" },
@@ -331,20 +367,49 @@ describe("runRecommendationsWithActiveLlm", () => {
 
     const out = await runRecommendationsWithActiveLlm({
       historyContext: "ctx",
-      catalog: [{ id: "only", title: "Only Film", year: 1999 }],
     });
     expect(out.usedLiveLlm).toBe(false);
+    expect(out.result.recommendations).toHaveLength(0);
     expect(out.result.disclaimer).toContain("Mock");
   });
 
   it("falls back to mock recommendations when resolver throws", async () => {
     runLiveReco.mockRejectedValueOnce(new Error("LLM outage"));
-    const catalog = [{ id: "movie-uuid", title: "Backup", year: 2010 }];
     const out = await runRecommendationsWithActiveLlm({
       historyContext: "",
-      catalog,
     });
     expect(out.usedLiveLlm).toBe(false);
-    expect(out.result.recommendations[0]?.title).toBe("Backup");
+    expect(out.result.recommendations).toHaveLength(0);
+  });
+});
+
+describe("production LLM guardrails", () => {
+  it("rejects NL fallback paths in production when provider is not wired", async () => {
+    prismaHoisted.appSettingsFind.mockResolvedValueOnce({
+      activeProvider: { providerKey: "anthropic" },
+      activeModel: { modelKey: "claude" },
+    });
+    vi.stubEnv("NODE_ENV", "production");
+
+    await expect(
+      runNlSearchWithActiveLlm({
+        query: "space movies",
+      }),
+    ).rejects.toThrow("Live LLM is required in production");
+  });
+
+  it("rejects recommendation fallback in production when resolver fails", async () => {
+    prismaHoisted.appSettingsFind.mockResolvedValueOnce({
+      activeProvider: { providerKey: "groq" },
+      activeModel: { modelKey: "mini" },
+    });
+    vi.stubEnv("NODE_ENV", "production");
+    runLiveReco.mockRejectedValueOnce(new Error("provider down"));
+
+    await expect(
+      runRecommendationsWithActiveLlm({
+        historyContext: "",
+      }),
+    ).rejects.toThrow("Live LLM is required in production");
   });
 });
